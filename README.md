@@ -4,7 +4,7 @@ A local web console for safely reviewing and cleaning Hypatia knowledge shelves.
 
 ## Run with npx
 
-Install [Hypatia](https://github.com/tkliuxing/hypatia) first, then run:
+Install [Hypatia](https://github.com/MarchLiu/hypatia) first, then run:
 
 ```bash
 npx --yes hypatia-archive
