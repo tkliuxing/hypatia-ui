@@ -1,0 +1,64 @@
+{
+  "name": "hypatia-archive",
+  "version": "0.1.0",
+  "description": "A local web console for safely reviewing and cleaning Hypatia knowledge shelves.",
+  "type": "module",
+  "bin": {
+    "hypatia-archive": "bin/hypatia-archive.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "concurrently -k \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:client": "vite --host 127.0.0.1",
+    "build": "npm run typecheck && npm run build:client && npm run build:server",
+    "build:client": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/cli-adapter.test.ts",
+    "start": "node bin/hypatia-archive.js",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "hypatia",
+    "knowledge-base",
+    "knowledge-graph",
+    "local-web-app"
+  ],
+  "author": "tkliuxing",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tkliuxing/hypatia-ui.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tkliuxing/hypatia-ui/issues"
+  },
+  "homepage": "https://github.com/tkliuxing/hypatia-ui#readme",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  }
+}
