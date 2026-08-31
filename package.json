@@ -1,6 +1,6 @@
 {
   "name": "hypatia-archive",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A local web console for safely reviewing and cleaning Hypatia knowledge shelves.",
   "type": "module",
   "bin": {
