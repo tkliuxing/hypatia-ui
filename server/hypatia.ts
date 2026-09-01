@@ -120,9 +120,12 @@ export function parseShelves(stdout: string): Shelf[] {
     });
 }
 
-export function buildKnowledgeQuery(search: string): unknown[] {
+export function buildKnowledgeQuery(search: string, options?: { limit: number; offset: number }): unknown {
   const value = search.trim();
-  return value ? ["$knowledge", ["$search", value]] : ["$knowledge"];
+  const conditions: unknown[] = value ? [["$search", value]] : [];
+
+  if (!options) return ["$knowledge", ...conditions];
+  return { $knowledge: conditions, limit: options.limit, offset: options.offset };
 }
 
 export function filterKnowledge(items: Knowledge[], tag: string, scope: string): Knowledge[] {
@@ -187,9 +190,45 @@ export function runHypatia(args: string[]): Promise<{ stdout: string; stderr: st
   return run;
 }
 
-export async function queryHypatia(shelf: string, jse: unknown[]): Promise<JsonRecord[]> {
+export async function queryHypatia(shelf: string, jse: unknown): Promise<JsonRecord[]> {
   const result = await runHypatia(["query", JSON.stringify(jse), "--shelf", shelf]);
   return parseCliRows(result.stdout);
+}
+
+export async function searchKnowledgeKeys(shelf: string, search: string, limit: number, offset: number): Promise<string[]> {
+  const result = await runHypatia([
+    "search",
+    search,
+    "--catalog",
+    "knowledge",
+    "--limit",
+    String(limit),
+    "--offset",
+    String(offset),
+    "--shelf",
+    shelf
+  ]);
+  return parseCliRows(result.stdout)
+    .map((row) => asString(row.key))
+    .filter(Boolean);
+}
+
+export async function getKnowledgeByNames(shelf: string, names: string[]): Promise<Knowledge[]> {
+  const uniqueNames = [...new Set(names.filter(Boolean))];
+  if (uniqueNames.length === 0) return [];
+
+  const conditions: unknown[] = uniqueNames.map((name) => ["$eq", "name", name]);
+  const condition = conditions.length === 1 ? conditions[0] : ["$or", ...conditions];
+  const rows = await queryHypatia(shelf, {
+    $knowledge: [condition],
+    limit: uniqueNames.length,
+    offset: 0
+  });
+  const byName = new Map(rows.map(normalizeKnowledge).map((knowledge) => [knowledge.name, knowledge]));
+  return uniqueNames.flatMap((name) => {
+    const knowledge = byName.get(name);
+    return knowledge ? [knowledge] : [];
+  });
 }
 
 export async function getKnowledge(shelf: string, name: string): Promise<Knowledge | null> {

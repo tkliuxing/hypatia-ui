@@ -31,6 +31,14 @@ test("constructs a direct knowledge query for blank and search states", () => {
   assert.deepEqual(buildKnowledgeQuery("memory bridge"), ["$knowledge", ["$search", "memory bridge"]]);
 });
 
+test("constructs a bounded JSE query for incremental reads", () => {
+  assert.deepEqual(buildKnowledgeQuery("", { limit: 51, offset: 100 }), {
+    $knowledge: [],
+    limit: 51,
+    offset: 100
+  });
+});
+
 test("filters knowledge by tag and global or named scope", () => {
   const entries = [
     { name: "One", content: { data: "", format: "markdown", tags: ["rule"], scopes: [""], figures: [] }, createdAt: "" },

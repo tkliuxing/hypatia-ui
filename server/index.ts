@@ -8,11 +8,13 @@ import {
   deleteStatement,
   filterKnowledge,
   getKnowledge,
+  getKnowledgeByNames,
   getRelationships,
   normalizeKnowledge,
   parseShelves,
   queryHypatia,
   runHypatia,
+  searchKnowledgeKeys,
   type Knowledge,
   type Relationship
 } from "./hypatia.js";
@@ -43,14 +45,54 @@ function paramValue(request: Request, key: string): string {
   return Array.isArray(value) ? value[0] || "" : value || "";
 }
 
-function pageValue(request: Request): number {
-  const parsed = Number.parseInt(queryValue(request, "page", "1"), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+const SCAN_BATCH_SIZE = 200;
+
+class RequestValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RequestValidationError";
+  }
+}
+
+interface KnowledgeCursor {
+  shelf: string;
+  q: string;
+  tag: string;
+  scope: string;
+  offset: number;
+}
+
+interface IndexedKnowledge {
+  knowledge: Knowledge;
+  nextOffset: number;
 }
 
 function limitValue(request: Request): number {
   const parsed = Number.parseInt(queryValue(request, "limit", "50"), 10);
   return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 100) : 50;
+}
+
+function encodeCursor(cursor: KnowledgeCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function decodeCursor(value: string, expected: Omit<KnowledgeCursor, "offset">): number {
+  if (!value) return 0;
+
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<KnowledgeCursor>;
+    const offset = parsed.offset;
+    if (
+      typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
+      parsed.shelf !== expected.shelf || parsed.q !== expected.q ||
+      parsed.tag !== expected.tag || parsed.scope !== expected.scope
+    ) {
+      throw new Error("Cursor does not match the current query.");
+    }
+    return offset;
+  } catch {
+    throw new RequestValidationError("The list cursor is invalid or belongs to a different query.");
+  }
 }
 
 function asyncRoute(handler: (request: Request, response: Response) => Promise<void>) {
@@ -63,6 +105,67 @@ function queueMutation<T>(operation: () => Promise<T>): Promise<T> {
   const result = mutationTail.then(operation, operation);
   mutationTail = result.then(() => undefined, () => undefined);
   return result;
+}
+
+async function loadSourceBatch(shelf: string, search: string, offset: number, limit: number): Promise<{ rows: IndexedKnowledge[]; exhausted: boolean }> {
+  if (search) {
+    const names = await searchKnowledgeKeys(shelf, search, limit, offset);
+    const knowledgeByName = new Map((await getKnowledgeByNames(shelf, names)).map((knowledge) => [knowledge.name, knowledge]));
+    return {
+      rows: names.flatMap((name, index) => {
+        const knowledge = knowledgeByName.get(name);
+        return knowledge ? [{ knowledge, nextOffset: offset + index + 1 }] : [];
+      }),
+      exhausted: names.length < limit
+    };
+  }
+
+  const rows = await queryHypatia(shelf, buildKnowledgeQuery("", { limit, offset }));
+  return {
+    rows: rows.map(normalizeKnowledge).map((knowledge, index) => ({ knowledge, nextOffset: offset + index + 1 })),
+    exhausted: rows.length < limit
+  };
+}
+
+async function loadKnowledgePage(
+  shelf: string,
+  search: string,
+  tag: string,
+  scope: string,
+  limit: number,
+  offset: number
+): Promise<{ items: Knowledge[]; nextCursor: string | null }> {
+  const selected: IndexedKnowledge[] = [];
+  const sourceLimit = tag || scope ? SCAN_BATCH_SIZE : limit + 1;
+  let sourceOffset = offset;
+
+  while (selected.length <= limit) {
+    const batch = await loadSourceBatch(shelf, search, sourceOffset, sourceLimit);
+    const matchingNames = new Set(filterKnowledge(batch.rows.map((row) => row.knowledge), tag, scope).map((knowledge) => knowledge.name));
+
+    for (const row of batch.rows) {
+      if (!matchingNames.has(row.knowledge.name)) continue;
+      selected.push(row);
+      if (selected.length > limit) break;
+    }
+
+    if (selected.length > limit) {
+      const items = selected.slice(0, limit);
+      const last = items.at(-1);
+      return {
+        items: items.map((row) => row.knowledge),
+        nextCursor: last ? encodeCursor({ shelf, q: search, tag, scope, offset: last.nextOffset }) : null
+      };
+    }
+
+    if (batch.exhausted) {
+      return { items: selected.map((row) => row.knowledge), nextCursor: null };
+    }
+
+    sourceOffset += sourceLimit;
+  }
+
+  return { items: [], nextCursor: null };
 }
 
 async function findImpact(shelf: string, name: string): Promise<{ knowledge: Knowledge; relationships: Relationship[] } | null> {
@@ -86,18 +189,10 @@ app.get("/api/knowledge", asyncRoute(async (request, response) => {
   const search = queryValue(request, "q");
   const tag = queryValue(request, "tag");
   const scope = queryValue(request, "scope");
-  const page = pageValue(request);
   const limit = limitValue(request);
-  const rows = await queryHypatia(shelf, buildKnowledgeQuery(search));
-  const filtered = filterKnowledge(rows.map(normalizeKnowledge), tag, scope);
-  const offset = (page - 1) * limit;
+  const offset = decodeCursor(queryValue(request, "cursor"), { shelf, q: search, tag, scope });
 
-  response.json({
-    items: filtered.slice(offset, offset + limit),
-    total: filtered.length,
-    page,
-    limit
-  });
+  response.json(await loadKnowledgePage(shelf, search, tag, scope, limit, offset));
 }));
 
 app.get("/api/knowledge/:name/impact", asyncRoute(async (request, response) => {
@@ -152,7 +247,7 @@ if (process.env.NODE_ENV === "production") {
 
 app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
   const message = error instanceof Error ? error.message : "Unexpected server error.";
-  const status = error instanceof HypatiaCliError ? 502 : 500;
+  const status = error instanceof RequestValidationError ? 400 : error instanceof HypatiaCliError ? 502 : 500;
   response.status(status).json({ error: message });
 });
 

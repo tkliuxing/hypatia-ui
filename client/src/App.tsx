@@ -2,6 +2,8 @@ import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   ArrowDownLeft,
   ArrowUpRight,
+  ChevronLeft,
+  ChevronRight,
   Database,
   FileSearch,
   LoaderCircle,
@@ -52,7 +54,10 @@ export function App() {
   const [scopeInput, setScopeInput] = useState("");
   const [filters, setFilters] = useState({ q: "", tag: "", scope: "" });
   const [items, setItems] = useState<Knowledge[]>([]);
-  const [total, setTotal] = useState(0);
+  const [currentCursor, setCurrentCursor] = useState<string | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [cursorHistory, setCursorHistory] = useState<Array<string | null>>([]);
+  const [pageNumber, setPageNumber] = useState(1);
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState("");
   const [selectedName, setSelectedName] = useState<string | null>(null);
@@ -64,23 +69,58 @@ export function App() {
   const [deleting, setDeleting] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
   const inspectRequest = useRef(0);
+  const listRequest = useRef(0);
+  const listController = useRef<AbortController | null>(null);
+  const listPanelRef = useRef<HTMLDivElement>(null);
   const inspectorRef = useRef<HTMLElement>(null);
 
-  const refreshKnowledge = useCallback(async () => {
+  const loadKnowledgePage = useCallback(async (
+    cursor: string | null,
+    nextHistory: Array<string | null>,
+    nextPageNumber: number
+  ) => {
+    listController.current?.abort();
+    const controller = new AbortController();
+    const requestId = ++listRequest.current;
+    listController.current = controller;
     setListLoading(true);
     setListError("");
+    setItems([]);
+    setCurrentCursor(cursor);
+    setNextCursor(null);
+    setCursorHistory(nextHistory);
+    setPageNumber(nextPageNumber);
+    listPanelRef.current?.scrollTo({ top: 0, behavior: "auto" });
     try {
-      const page = await getKnowledgePage({ shelf, ...filters, limit: 50 });
+      const page = await getKnowledgePage({ shelf, ...filters, cursor: cursor || undefined, limit: 50, signal: controller.signal });
+      if (requestId !== listRequest.current) return;
       setItems(page.items);
-      setTotal(page.total);
+      setCurrentCursor(cursor);
+      setNextCursor(page.nextCursor);
+      setCursorHistory(nextHistory);
+      setPageNumber(nextPageNumber);
     } catch (error) {
+      if (controller.signal.aborted || requestId !== listRequest.current) return;
       setListError(error instanceof Error ? error.message : "Unable to load knowledge.");
       setItems([]);
-      setTotal(0);
+      setNextCursor(null);
     } finally {
-      setListLoading(false);
+      if (requestId === listRequest.current) setListLoading(false);
     }
   }, [filters, shelf]);
+
+  const refreshKnowledge = useCallback(() => loadKnowledgePage(null, [], 1), [loadKnowledgePage]);
+
+  const previousPage = useCallback(() => {
+    if (listLoading || cursorHistory.length === 0) return;
+    const previousCursor = cursorHistory.at(-1) || null;
+    void loadKnowledgePage(previousCursor, cursorHistory.slice(0, -1), pageNumber - 1);
+  }, [cursorHistory, listLoading, loadKnowledgePage, pageNumber]);
+
+  const nextPage = useCallback(() => {
+    if (listLoading || !nextCursor) return;
+    void loadKnowledgePage(nextCursor, [...cursorHistory, currentCursor], pageNumber + 1);
+  }, [currentCursor, cursorHistory, listLoading, loadKnowledgePage, nextCursor, pageNumber]);
 
   useEffect(() => {
     let active = true;
@@ -100,6 +140,8 @@ export function App() {
   useEffect(() => {
     void refreshKnowledge();
   }, [refreshKnowledge]);
+
+  useEffect(() => () => listController.current?.abort(), []);
 
   const availableScopes = useMemo(() => {
     const values = new Set<string>();
@@ -242,18 +284,25 @@ export function App() {
             <button className="command-button" type="submit"><Search size={16} /> Search</button>
             <button className="text-button" type="button" onClick={resetSearch}>Reset</button>
           </form>
-          <div className="result-summary"><span>{listLoading ? "Scanning shelf" : total + " entries"}</span><span>Full-text + filters</span></div>
+          <div className="result-summary">
+            <span>{listLoading && items.length === 0 ? "Loading page" : "Page " + pageNumber}</span>
+            <div className="page-controls" aria-label="Knowledge page navigation">
+              <span className="page-count" aria-live="polite">{items.length + " records"}</span>
+              <button className="icon-button pager-button" type="button" title="Previous page" aria-label="Previous page" onClick={previousPage} disabled={listLoading || cursorHistory.length === 0}><ChevronLeft size={17} /></button>
+              <button className="icon-button pager-button" type="button" title="Next page" aria-label="Next page" onClick={nextPage} disabled={listLoading || !nextCursor}><ChevronRight size={17} /></button>
+            </div>
+          </div>
         </section>
 
         {notice ? <div className={"notice notice-" + notice.tone} role="status"><span>{notice.text}</span><button type="button" className="notice-close" onClick={() => setNotice(null)} aria-label="Dismiss message"><X size={15} /></button></div> : null}
 
         <section className="content-grid">
-          <div className="knowledge-panel">
+          <div ref={listPanelRef} className="knowledge-panel">
             <div className="table-head"><span>Entry</span><span>Context</span><span>Created</span></div>
-            {listError ? <div className="blank-state error-state"><FileSearch size={24} /><p>{listError}</p></div> : null}
-            {!listError && listLoading ? <div className="blank-state"><LoaderCircle size={26} className="spin" /><p>Loading knowledge records</p></div> : null}
+            {listError && items.length === 0 ? <div className="blank-state error-state"><FileSearch size={24} /><p>{listError}</p></div> : null}
+            {!listError && listLoading && items.length === 0 ? <div className="blank-state"><LoaderCircle size={26} className="spin" /><p>Loading knowledge records</p></div> : null}
             {!listError && !listLoading && items.length === 0 ? <div className="blank-state"><FileSearch size={26} /><p>No knowledge matches this view</p></div> : null}
-            {!listError && !listLoading && items.map((item) => (
+            {items.map((item) => (
               <button key={item.name} type="button" className={"knowledge-row " + (selectedName === item.name ? "is-selected" : "")} onClick={() => void openImpact(item.name)}>
                 <span className="knowledge-primary"><strong>{item.name}</strong><small>{excerpt(item.content.data)}</small></span>
                 <span className="row-context">
@@ -263,6 +312,7 @@ export function App() {
                 <time dateTime={item.createdAt}>{dateLabel(item.createdAt)}</time>
               </button>
             ))}
+            {listError && items.length > 0 ? <p className="list-inline-error error-state">{listError}</p> : null}
           </div>
 
           <aside ref={inspectorRef} className="inspector" aria-label="Knowledge inspector">

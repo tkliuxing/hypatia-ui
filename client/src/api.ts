@@ -29,9 +29,7 @@ export interface Shelf {
 
 export interface KnowledgePage {
   items: Knowledge[];
-  total: number;
-  page: number;
-  limit: number;
+  nextCursor: string | null;
 }
 
 export interface Impact {
@@ -52,15 +50,15 @@ export function getShelves(): Promise<{ shelves: Shelf[] }> {
   return request("/api/shelves");
 }
 
-export function getKnowledgePage(params: { shelf: string; q: string; tag: string; scope: string; page?: number; limit?: number }): Promise<KnowledgePage> {
+export function getKnowledgePage(params: { shelf: string; q: string; tag: string; scope: string; cursor?: string; limit?: number; signal?: AbortSignal }): Promise<KnowledgePage> {
   const search = new URLSearchParams();
   search.set("shelf", params.shelf);
   if (params.q) search.set("q", params.q);
   if (params.tag) search.set("tag", params.tag);
   if (params.scope) search.set("scope", params.scope);
-  search.set("page", String(params.page || 1));
+  if (params.cursor) search.set("cursor", params.cursor);
   search.set("limit", String(params.limit || 50));
-  return request("/api/knowledge?" + search.toString());
+  return request("/api/knowledge?" + search.toString(), { signal: params.signal });
 }
 
 export function getImpact(shelf: string, name: string): Promise<Impact> {
