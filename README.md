@@ -26,11 +26,25 @@ npx --yes hypatia-archive --no-open
 - Lists registered Hypatia shelves and works with the selected connected shelf.
 - Searches knowledge with Hypatia's JSE full-text query, then filters locally by tag and scope.
 - Opens the complete knowledge record with its direct incoming and outgoing statements.
+- Maps a focused local neighborhood in the Graph workspace, including statement references whose knowledge record has been deleted.
+- Lets users inspect nodes and directed relationships, expand a node's immediate relations, and refocus the map with the toolbar control or a double-click/tap.
+- Adds each graph focus change to browser history, so Back and Forward restore the previously focused node.
+- Renders Markdown knowledge content with headings, links, code, lists, quotes, and images while skipping raw HTML.
 - Previews deletion impact before every deletion.
 - Requires typing the exact knowledge name before deletion.
 - Offers an explicit choice to retain related statements or delete them with the knowledge entry.
 
 Hypatia's native `knowledge-delete` command does not cascade to statements. The console preserves that behavior by default and only removes related statements when the destructive option is checked.
+
+## Explore Relationships
+
+Open **Graph** from a selected record or switch to the Graph workspace. The view begins with one focused knowledge entity and its direct incoming and outgoing statements, rather than loading the complete shelf. Select a node to inspect it, then use **Focus map** or double-click/tap a node to make it the next local map center. Browser Back and Forward move between those focus states.
+
+The graph limits each direct direction to 60 relationships and caps the visible workspace at 90 nodes or 160 edges. A dangling reference node remains visible when a statement still refers to a deleted knowledge record, matching the default non-cascading deletion behavior.
+
+## Read Formatted Content
+
+Knowledge records whose stored format is `markdown` or `md` are rendered with `react-markdown`. Standard Markdown is displayed as formatted content in both the record inspector and graph inspector. Raw HTML is skipped rather than inserted into the page.
 
 ## Requirements
 

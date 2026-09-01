@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildKnowledgeQuery,
+  buildStatementQuery,
   filterKnowledge,
   normalizeKnowledge,
   parseCliRows,
@@ -36,6 +37,14 @@ test("constructs a bounded JSE query for incremental reads", () => {
     $knowledge: [],
     limit: 51,
     offset: 100
+  });
+});
+
+test("constructs bounded statement queries for graph neighborhoods", () => {
+  assert.deepEqual(buildStatementQuery(["$triple", "API", "$*", "$*"], 60), {
+    $statement: [["$triple", "API", "$*", "$*"]],
+    limit: 60,
+    offset: 0
   });
 });
 

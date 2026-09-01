@@ -37,6 +37,27 @@ export interface Impact {
   relationships: Relationship[];
 }
 
+export interface GraphNode {
+  id: string;
+  name: string;
+  knowledge: Knowledge | null;
+}
+
+export interface GraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  predicate: string;
+  createdAt: string;
+  content: KnowledgeContent;
+}
+
+export interface GraphNodeResponse {
+  focus: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
 async function request<T>(input: string, init?: RequestInit): Promise<T> {
   const response = await fetch(input, init);
   const body = await response.json().catch(() => ({}));
@@ -64,6 +85,11 @@ export function getKnowledgePage(params: { shelf: string; q: string; tag: string
 export function getImpact(shelf: string, name: string): Promise<Impact> {
   const search = new URLSearchParams({ shelf });
   return request("/api/knowledge/" + encodeURIComponent(name) + "/impact?" + search.toString());
+}
+
+export function getGraphNode(shelf: string, name: string): Promise<GraphNodeResponse> {
+  const search = new URLSearchParams({ shelf });
+  return request("/api/graph/node/" + encodeURIComponent(name) + "?" + search.toString());
 }
 
 export function deleteKnowledge(shelf: string, name: string, deleteRelations: boolean, acknowledgedName: string): Promise<{ name: string; deletedRelations: number; retainedRelations: number }> {

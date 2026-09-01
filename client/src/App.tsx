@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -14,6 +14,7 @@ import {
   Trash2,
   X
 } from "lucide-react";
+import { ContentRenderer } from "./ContentRenderer";
 import {
   deleteKnowledge,
   getImpact,
@@ -25,7 +26,34 @@ import {
   type Shelf
 } from "./api";
 
+const GraphView = lazy(() => import("./GraphView").then(({ GraphView: Component }) => ({ default: Component })));
+
 type Notice = { tone: "success" | "error"; text: string } | null;
+type WorkspaceView = "records" | "graph";
+
+function initialSearchParam(name: string): string | null {
+  return new URLSearchParams(window.location.search).get(name);
+}
+
+function workspaceLocation(): { view: WorkspaceView; shelf: string; focus: string | null } {
+  return {
+    view: initialSearchParam("view") === "graph" ? "graph" : "records",
+    shelf: initialSearchParam("shelf") || "default",
+    focus: initialSearchParam("focus")
+  };
+}
+
+function updateWorkspaceAddress(view: WorkspaceView, shelf: string, focus: string | null, mode: "replace" | "push" = "replace"): void {
+  const params = new URLSearchParams(window.location.search);
+  params.set("view", view);
+  params.set("shelf", shelf);
+  if (focus) params.set("focus", focus);
+  else params.delete("focus");
+  const query = params.toString();
+  const url = window.location.pathname + (query ? "?" + query : "");
+  if (mode === "push") window.history.pushState(null, "", url);
+  else window.history.replaceState(null, "", url);
+}
 
 function dateLabel(value: string): string {
   return value ? value.replace("T", " ").slice(0, 16) : "Unknown date";
@@ -48,7 +76,8 @@ function directionLabel(relationship: Relationship): string {
 
 export function App() {
   const [shelves, setShelves] = useState<Shelf[]>([]);
-  const [shelf, setShelf] = useState("default");
+  const [shelf, setShelf] = useState(() => initialSearchParam("shelf") || "default");
+  const [view, setView] = useState<WorkspaceView>(() => initialSearchParam("view") === "graph" ? "graph" : "records");
   const [queryInput, setQueryInput] = useState("");
   const [tagInput, setTagInput] = useState("");
   const [scopeInput, setScopeInput] = useState("");
@@ -60,7 +89,7 @@ export function App() {
   const [pageNumber, setPageNumber] = useState(1);
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState("");
-  const [selectedName, setSelectedName] = useState<string | null>(null);
+  const [selectedName, setSelectedName] = useState<string | null>(() => initialSearchParam("focus"));
   const [impact, setImpact] = useState<Impact | null>(null);
   const [impactLoading, setImpactLoading] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Impact | null>(null);
@@ -128,7 +157,10 @@ export function App() {
       .then(({ shelves: nextShelves }) => {
         if (!active) return;
         setShelves(nextShelves);
-        const preferred = nextShelves.find((entry) => entry.name === "default" && entry.connected) || nextShelves.find((entry) => entry.connected);
+        const requestedShelf = initialSearchParam("shelf");
+        const preferred = (requestedShelf ? nextShelves.find((entry) => entry.name === requestedShelf && entry.connected) : undefined)
+          || nextShelves.find((entry) => entry.name === "default" && entry.connected)
+          || nextShelves.find((entry) => entry.connected);
         if (preferred) setShelf(preferred.name);
       })
       .catch((error: unknown) => {
@@ -142,6 +174,22 @@ export function App() {
   }, [refreshKnowledge]);
 
   useEffect(() => () => listController.current?.abort(), []);
+
+  useEffect(() => {
+    function restoreWorkspaceFromHistory() {
+      const location = workspaceLocation();
+      inspectRequest.current += 1;
+      setView(location.view);
+      setShelf(location.shelf);
+      setSelectedName(location.focus);
+      setImpact(null);
+      setImpactLoading(false);
+      setNotice(null);
+    }
+
+    window.addEventListener("popstate", restoreWorkspaceFromHistory);
+    return () => window.removeEventListener("popstate", restoreWorkspaceFromHistory);
+  }, []);
 
   const availableScopes = useMemo(() => {
     const values = new Set<string>();
@@ -177,6 +225,26 @@ export function App() {
       if (requestId === inspectRequest.current) setImpactLoading(false);
     }
   }, [shelf]);
+
+  function switchWorkspace(nextView: WorkspaceView) {
+    setView(nextView);
+    updateWorkspaceAddress(nextView, shelf, selectedName);
+  }
+
+  function openGraph(name: string) {
+    const isNewFocus = view !== "graph" || selectedName !== name;
+    setSelectedName(name);
+    setImpact(null);
+    setView("graph");
+    updateWorkspaceAddress("graph", shelf, name, isNewFocus ? "push" : "replace");
+  }
+
+  function selectShelf(name: string) {
+    setShelf(name);
+    setSelectedName(null);
+    setImpact(null);
+    updateWorkspaceAddress(view, name, null);
+  }
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -241,11 +309,7 @@ export function App() {
                 className={"shelf-button " + (entry.name === shelf ? "is-active" : "")}
                 type="button"
                 disabled={!entry.connected}
-                onClick={() => {
-                  setShelf(entry.name);
-                  setSelectedName(null);
-                  setImpact(null);
-                }}
+                onClick={() => selectShelf(entry.name)}
               >
                 <span className="shelf-indicator" aria-hidden="true" />
                 <span className="shelf-name">{entry.name}</span>
@@ -261,9 +325,15 @@ export function App() {
       <main className="workspace">
         <header className="workspace-header">
           <div><p className="eyebrow">SHELF / {shelf}</p><h2>Knowledge maintenance</h2></div>
-          <button className="icon-button" type="button" title="Refresh knowledge" aria-label="Refresh knowledge" onClick={() => void refreshKnowledge()} disabled={listLoading}>
-            <RefreshCw size={18} className={listLoading ? "spin" : ""} />
-          </button>
+          <div className="workspace-actions">
+            <div className="view-switch" role="tablist" aria-label="Workspace view">
+              <button className={"view-tab " + (view === "records" ? "is-active" : "")} type="button" role="tab" aria-selected={view === "records"} onClick={() => switchWorkspace("records")}>Records</button>
+              <button className={"view-tab " + (view === "graph" ? "is-active" : "")} type="button" role="tab" aria-selected={view === "graph"} onClick={() => switchWorkspace("graph")}><Network size={15} /> Graph</button>
+            </div>
+            <button className="icon-button" type="button" title="Refresh knowledge" aria-label="Refresh knowledge" onClick={() => void refreshKnowledge()} disabled={listLoading}>
+              <RefreshCw size={18} className={listLoading ? "spin" : ""} />
+            </button>
+          </div>
         </header>
 
         <section className="search-band" aria-label="Knowledge search">
@@ -296,7 +366,7 @@ export function App() {
 
         {notice ? <div className={"notice notice-" + notice.tone} role="status"><span>{notice.text}</span><button type="button" className="notice-close" onClick={() => setNotice(null)} aria-label="Dismiss message"><X size={15} /></button></div> : null}
 
-        <section className="content-grid">
+        {view === "records" ? <section className="content-grid">
           <div ref={listPanelRef} className="knowledge-panel">
             <div className="table-head"><span>Entry</span><span>Context</span><span>Created</span></div>
             {listError && items.length === 0 ? <div className="blank-state error-state"><FileSearch size={24} /><p>{listError}</p></div> : null}
@@ -318,9 +388,9 @@ export function App() {
           <aside ref={inspectorRef} className="inspector" aria-label="Knowledge inspector">
             {impactLoading ? <div className="inspector-loading"><LoaderCircle className="spin" size={25} /><span>Reading entry and relations</span></div> : null}
             {!impactLoading && !impact ? <div className="inspector-empty"><Network size={30} /><h3>Inspect the graph</h3><p>Select a knowledge entry to read its full content and check every direct relationship before cleaning it.</p></div> : null}
-            {!impactLoading && impact ? <Inspector impact={impact} onDelete={openDelete} /> : null}
+            {!impactLoading && impact ? <Inspector impact={impact} onDelete={openDelete} onOpenGraph={() => openGraph(impact.knowledge.name)} /> : null}
           </aside>
-        </section>
+        </section> : <Suspense fallback={<section className="graph-loading"><LoaderCircle size={26} className="spin" /><span>Loading graph workspace</span></section>}><GraphView shelf={shelf} initialNodeName={selectedName || items[0]?.name || null} onFocusChange={openGraph} /></Suspense>}
       </main>
 
       {deleteTarget ? (
@@ -347,17 +417,20 @@ export function App() {
   );
 }
 
-function Inspector({ impact, onDelete }: { impact: Impact; onDelete: () => void }) {
+function Inspector({ impact, onDelete, onOpenGraph }: { impact: Impact; onDelete: () => void; onOpenGraph: () => void }) {
   const knowledge = impact.knowledge;
   const relationships = impact.relationships;
   return (
     <>
       <div className="inspector-head">
         <div><p className="eyebrow">KNOWLEDGE RECORD</p><h3>{knowledge.name}</h3></div>
-        <button type="button" className="icon-button danger-icon" onClick={onDelete} title="Delete this knowledge entry" aria-label="Delete this knowledge entry"><Trash2 size={17} /></button>
+        <div className="inspector-actions">
+          <button type="button" className="icon-button" onClick={onOpenGraph} title="Open in graph" aria-label="Open in graph"><Network size={17} /></button>
+          <button type="button" className="icon-button danger-icon" onClick={onDelete} title="Delete this knowledge entry" aria-label="Delete this knowledge entry"><Trash2 size={17} /></button>
+        </div>
       </div>
       <div className="metadata-line"><span>{knowledge.content.format}</span><span>{dateLabel(knowledge.createdAt)}</span></div>
-      <div className="content-copy">{knowledge.content.data || "No stored content."}</div>
+      <ContentRenderer content={knowledge.content} emptyMessage="No stored content." />
       <div className="metadata-groups">
         <div><p><Tags size={14} /> Tags</p><div className="chip-wrap">{knowledge.content.tags.length ? knowledge.content.tags.map((tag) => <span className="chip tag-chip" key={tag}>{tag}</span>) : <span className="muted">None</span>}</div></div>
         <div><p><Database size={14} /> Scopes</p><div className="chip-wrap">{knowledge.content.scopes.length ? knowledge.content.scopes.map((scope) => <span className="chip scope-chip" key={scope || "global"}>{scopeLabel(scope)}</span>) : <span className="muted">Unscoped</span>}</div></div>

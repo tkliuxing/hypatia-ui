@@ -241,10 +241,15 @@ function relationshipKey(statement: Statement): string {
   return [statement.subject, statement.predicate, statement.object].join("\u0000");
 }
 
-export async function getRelationships(shelf: string, name: string): Promise<Relationship[]> {
+export function buildStatementQuery(condition: unknown, limit?: number): unknown {
+  if (!limit) return ["$statement", condition];
+  return { $statement: [condition], limit, offset: 0 };
+}
+
+export async function getRelationships(shelf: string, name: string, limit?: number): Promise<Relationship[]> {
   const results = await Promise.all([
-    queryHypatia(shelf, ["$statement", ["$triple", name, "$*", "$*"]]),
-    queryHypatia(shelf, ["$statement", ["$triple", "$*", "$*", name]])
+    queryHypatia(shelf, buildStatementQuery(["$triple", name, "$*", "$*"], limit)),
+    queryHypatia(shelf, buildStatementQuery(["$triple", "$*", "$*", name], limit))
   ]);
   const relationships = new Map<string, Relationship>();
 

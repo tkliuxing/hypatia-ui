@@ -1,6 +1,6 @@
 {
   "name": "hypatia-archive",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A local web console for safely reviewing and cleaning Hypatia knowledge shelves.",
   "type": "module",
   "bin": {
@@ -21,7 +21,7 @@
     "build:client": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/cli-adapter.test.ts",
+    "test": "tsx --test tests/*.test.ts",
     "start": "node bin/hypatia-archive.js",
     "prepack": "npm run build"
   },
@@ -45,10 +45,12 @@
     "node": ">=22"
   },
   "dependencies": {
+    "cytoscape": "^3.34.2",
     "express": "^5.1.0",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.1",

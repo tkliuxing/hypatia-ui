@@ -46,6 +46,7 @@ function paramValue(request: Request, key: string): string {
 }
 
 const SCAN_BATCH_SIZE = 200;
+const GRAPH_RELATION_LIMIT = 60;
 
 class RequestValidationError extends Error {
   constructor(message: string) {
@@ -65,6 +66,21 @@ interface KnowledgeCursor {
 interface IndexedKnowledge {
   knowledge: Knowledge;
   nextOffset: number;
+}
+
+interface GraphNode {
+  id: string;
+  name: string;
+  knowledge: Knowledge | null;
+}
+
+interface GraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  predicate: string;
+  createdAt: string;
+  content: Relationship["content"];
 }
 
 function limitValue(request: Request): number {
@@ -174,6 +190,31 @@ async function findImpact(shelf: string, name: string): Promise<{ knowledge: Kno
   return knowledge ? { knowledge, relationships: results[1] } : null;
 }
 
+function graphEdgeId(relationship: Relationship): string {
+  return [relationship.subject, relationship.predicate, relationship.object].map(encodeURIComponent).join("%00");
+}
+
+async function findGraphNode(shelf: string, name: string): Promise<{ focus: string; nodes: GraphNode[]; edges: GraphEdge[] } | null> {
+  const relationships = await getRelationships(shelf, name, GRAPH_RELATION_LIMIT);
+  const names = [...new Set([name, ...relationships.flatMap((relationship) => [relationship.subject, relationship.object])])];
+  const knowledgeByName = new Map((await getKnowledgeByNames(shelf, names)).map((knowledge) => [knowledge.name, knowledge]));
+
+  if (!knowledgeByName.has(name) && relationships.length === 0) return null;
+
+  return {
+    focus: name,
+    nodes: names.map((nodeName) => ({ id: nodeName, name: nodeName, knowledge: knowledgeByName.get(nodeName) || null })),
+    edges: relationships.map((relationship) => ({
+      id: graphEdgeId(relationship),
+      source: relationship.subject,
+      target: relationship.object,
+      predicate: relationship.predicate,
+      createdAt: relationship.createdAt,
+      content: relationship.content
+    }))
+  };
+}
+
 app.get("/api/health", asyncRoute(async (_request, response) => {
   const result = await runHypatia(["--version"]);
   response.json({ status: "ready", version: result.stdout.trim() });
@@ -193,6 +234,16 @@ app.get("/api/knowledge", asyncRoute(async (request, response) => {
   const offset = decodeCursor(queryValue(request, "cursor"), { shelf, q: search, tag, scope });
 
   response.json(await loadKnowledgePage(shelf, search, tag, scope, limit, offset));
+}));
+
+app.get("/api/graph/node/:name", asyncRoute(async (request, response) => {
+  const shelf = queryValue(request, "shelf", "default");
+  const graphNode = await findGraphNode(shelf, paramValue(request, "name"));
+  if (!graphNode) {
+    response.status(404).json({ error: "Knowledge or graph entity was not found." });
+    return;
+  }
+  response.json(graphNode);
 }));
 
 app.get("/api/knowledge/:name/impact", asyncRoute(async (request, response) => {
