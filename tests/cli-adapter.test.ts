@@ -6,6 +6,7 @@ import {
   filterKnowledge,
   normalizeContent,
   normalizeKnowledge,
+  normalizeStatement,
   parseCliObject,
   parseCliRows,
   parseShelves
@@ -23,6 +24,33 @@ test("parses Hypatia query rows and normalizes optional content fields", () => {
   assert.deepEqual(knowledge.content.tags, ["language"]);
   assert.deepEqual(knowledge.content.scopes, []);
   assert.deepEqual(knowledge.content.figures, []);
+});
+
+test("normalizes Hypatia 0.3 statement positions with legacy fallbacks", () => {
+  const current = normalizeStatement({
+    head: "API",
+    relation: "depends_on",
+    tail: "Database",
+    created_at: "2026-01-01 10:00:00",
+    content: { data: "primary store" }
+  });
+  const legacy = normalizeStatement({
+    subject: "Worker",
+    predicate: "uses",
+    object: "Queue",
+    content: {}
+  });
+
+  assert.deepEqual(current, {
+    subject: "API",
+    predicate: "depends_on",
+    object: "Database",
+    createdAt: "2026-01-01 10:00:00",
+    content: { data: "primary store", format: "markdown", tags: [], scopes: [], figures: [] }
+  });
+  assert.equal(legacy.subject, "Worker");
+  assert.equal(legacy.predicate, "uses");
+  assert.equal(legacy.object, "Queue");
 });
 
 test("handles empty output from the Hypatia query formatter", () => {

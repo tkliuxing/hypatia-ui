@@ -46,12 +46,16 @@ The graph limits each direct direction to 60 relationships and caps the visible 
 
 Knowledge records whose stored format is `markdown` or `md` are rendered with `react-markdown`. Standard Markdown is displayed as formatted content in both the record inspector and graph inspector. Raw HTML is skipped rather than inserted into the page.
 
+## Hypatia Compatibility
+
+Hypatia Archive `0.1.3` is validated with [Hypatia 0.3.0](https://github.com/MarchLiu/hypatia). Hypatia 0.3.0 returns statement positions as `head`, `relation`, and `tail`; the server normalizes those fields for the record inspector and Graph workspace. The prior `subject`, `predicate`, and `object` response shape remains supported for compatibility with older shelves and CLI releases.
+
 ## Requirements
 
 - Node.js 22 or later
 - Hypatia installed and available on `PATH`, or `HYPATIA_BIN` set to the absolute executable path
 
-The server only binds to `127.0.0.1`. It invokes Hypatia through `spawn` with argv arrays, not a shell command string. Calls are serialized because Hypatia's DuckDB shelf file allows one CLI process at a time.
+The server only binds to `127.0.0.1`. It invokes Hypatia through `spawn` with argv arrays, not a shell command string. Calls are serialized because Hypatia's shelf store permits one CLI process at a time.
 
 ## Develop From Source
 

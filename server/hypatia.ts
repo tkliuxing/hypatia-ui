@@ -78,9 +78,9 @@ export function normalizeKnowledge(value: JsonRecord): Knowledge {
 
 export function normalizeStatement(value: JsonRecord): Statement {
   return {
-    subject: asString(value.subject),
-    predicate: asString(value.predicate),
-    object: asString(value.object),
+    subject: asString(value.head) || asString(value.subject),
+    predicate: asString(value.relation) || asString(value.predicate),
+    object: asString(value.tail) || asString(value.object),
     createdAt: asString(value.created_at),
     content: normalizeContent(value.content)
   };
