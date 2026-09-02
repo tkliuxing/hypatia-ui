@@ -4,7 +4,9 @@ import {
   buildKnowledgeQuery,
   buildStatementQuery,
   filterKnowledge,
+  normalizeContent,
   normalizeKnowledge,
+  parseCliObject,
   parseCliRows,
   parseShelves
 } from "../server/hypatia.js";
@@ -62,4 +64,28 @@ test("parses connected shelf lines without assuming a fixed path", () => {
   assert.deepEqual(parseShelves("  default  /Users/example/.hypatia/default  [connected]\n"), [
     { name: "default", path: "/Users/example/.hypatia/default", connected: true }
   ]);
+});
+
+test("normalizes malformed content without leaking invalid fields", () => {
+  assert.deepEqual(normalizeContent({
+    data: 42,
+    format: "",
+    tags: ["valid", 2],
+    scopes: null,
+    figures: "not-an-array"
+  }), {
+    data: "",
+    format: "markdown",
+    tags: ["valid"],
+    scopes: [],
+    figures: []
+  });
+});
+
+test("parses knowledge object sentinels and rejects malformed results", () => {
+  assert.equal(parseCliObject("No results found.\n"), null);
+  assert.equal(parseCliObject("Knowledge not found.\n"), null);
+  assert.deepEqual(parseCliObject(JSON.stringify({ name: "Alpha" })), { name: "Alpha" });
+  assert.throws(() => parseCliObject("[]"), /unexpected knowledge response/i);
+  assert.throws(() => parseCliRows("{\"name\":\"Alpha\"}"), /unexpected query response/i);
 });
