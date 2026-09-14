@@ -33,8 +33,17 @@ npx --yes hypatia-archive --no-open
 - Previews deletion impact before every deletion.
 - Requires typing the exact knowledge name before deletion.
 - Offers an explicit choice to retain related statements or delete them with the knowledge entry.
+- Selects several records with the checkbox column, including a select-all for the page on screen, and deletes them in one confirmed batch of up to 50.
 
 Hypatia's native `knowledge-delete` command does not cascade to statements. The console preserves that behavior by default and only removes related statements when the destructive option is checked.
+
+## Delete Several Records
+
+Check the records to remove, then use **Delete selected**. The dialog lists every entry that will go, keeps the same opt-in choice about related statements, and asks for the number of selected records to be typed back — the count plays the part the record name plays for a single deletion, and the server re-checks it, so a caller that skips the dialog is refused the same way.
+
+A batch is not a transaction. Hypatia has no multi-record write, so the records are removed one at a time behind a single mutation slot; a record that is already gone or whose removal fails is reported and stepped over rather than abandoning the records behind it, and records already removed are not rolled back. The result message names how many were deleted, how many were already gone, how many failed, and how many statements were removed or retained.
+
+Selection belongs to the page on screen. Paging, filtering, refreshing, or switching shelves clears it, so nothing invisible is ever included in a deletion.
 
 ## Explore Relationships
 

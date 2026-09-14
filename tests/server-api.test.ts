@@ -298,3 +298,134 @@ test("Hypatia CLI failures become API gateway errors", async () => {
     assert.deepEqual(response.body, { error: "Hypatia is unavailable." });
   });
 });
+
+test("bulk deletion requires the retyped count and a workable name list", async () => {
+  const calls: string[] = [];
+  const service = createFakeHypatia({ records: [knowledge("Alpha"), knowledge("Beta")], calls });
+
+  await withServer(service, async (baseUrl) => {
+    const batchDelete = (body: unknown) => requestJson(baseUrl, "/api/knowledge", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+
+    // "Alpha" twice is one record, so a count of three cannot be right.
+    const mismatched = await batchDelete({ names: ["Alpha", "Beta", "Alpha"], acknowledgedCount: 3 });
+    assert.equal(mismatched.status, 400);
+    assert.match(String(mismatched.body.error), /exact number/i);
+
+    for (const names of [undefined, [], [""], [1, 2], Array.from({ length: 51 }, (_, index) => "Entry " + index)]) {
+      const rejected = await batchDelete({ names, acknowledgedCount: 1 });
+      assert.equal(rejected.status, 400);
+    }
+    assert.deepEqual(calls, []);
+
+    const accepted = await batchDelete({ names: ["Alpha", "Beta", "Alpha"], acknowledgedCount: 2 });
+    assert.equal(accepted.status, 200);
+    assert.deepEqual(accepted.body.outcomes, [
+      { name: "Alpha", status: "deleted", deletedRelations: 0, retainedRelations: 0, error: "" },
+      { name: "Beta", status: "deleted", deletedRelations: 0, retainedRelations: 0, error: "" }
+    ]);
+    assert.deepEqual(calls, ["knowledge:Alpha", "knowledge:Beta"]);
+  });
+});
+
+test("a bulk deletion steps over absent and failing records", async () => {
+  const calls: string[] = [];
+  const service = createFakeHypatia({
+    records: [knowledge("Alpha"), knowledge("Locked"), knowledge("Beta")],
+    calls,
+    onDeleteKnowledge: async (name) => {
+      if (name === "Locked") throw new HypatiaCliError("shelf is read-only");
+    }
+  });
+
+  await withServer(service, async (baseUrl) => {
+    const result = await requestJson(baseUrl, "/api/knowledge", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names: ["Alpha", "Locked", "Missing", "Beta"], acknowledgedCount: 4 })
+    });
+
+    assert.equal(result.status, 200);
+    assert.equal(result.body.deletedCount, 2);
+    assert.equal(result.body.missingCount, 1);
+    assert.equal(result.body.failedCount, 1);
+    assert.deepEqual((result.body.outcomes as Array<{ name: string; status: string }>).map((outcome) => outcome.name + ":" + outcome.status), [
+      "Alpha:deleted",
+      "Locked:failed",
+      "Missing:missing",
+      "Beta:deleted"
+    ]);
+    assert.deepEqual(calls, ["knowledge:Alpha", "knowledge:Locked", "knowledge:Beta"]);
+  });
+});
+
+test("a statement between two deleted records is removed and counted once", async () => {
+  const calls: string[] = [];
+  const removed = new Set<string>();
+  const service = createFakeHypatia({ records: [knowledge("Alpha"), knowledge("Beta")], calls });
+  const shared = relationship("Alpha", "links", "Beta");
+  // The impact is re-read per record, so the statement taken out with Alpha is
+  // already gone by the time Beta is looked at.
+  service.getRelationships = async () => removed.has("shared") ? [] : [shared];
+  service.deleteStatement = async (_shelf, item) => {
+    removed.add("shared");
+    calls.push("statement:" + item.subject + ":" + item.predicate + ":" + item.object);
+  };
+
+  await withServer(service, async (baseUrl) => {
+    const result = await requestJson(baseUrl, "/api/knowledge", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names: ["Alpha", "Beta"], acknowledgedCount: 2, deleteRelations: true })
+    });
+
+    assert.equal(result.status, 200);
+    assert.equal(result.body.deletedRelations, 1);
+    assert.deepEqual(calls, ["statement:Alpha:links:Beta", "knowledge:Alpha", "knowledge:Beta"]);
+  });
+});
+
+test("a bulk deletion holds the mutation queue for the whole run", async () => {
+  const calls: string[] = [];
+  const service = createFakeHypatia({
+    records: [knowledge("Alpha"), knowledge("Beta"), knowledge("Solo")],
+    calls,
+    onDeleteKnowledge: async (name) => {
+      calls.push("start:" + name);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      calls.push("end:" + name);
+    }
+  });
+
+  await withServer(service, async (baseUrl) => {
+    const [batch, single] = await Promise.all([
+      requestJson(baseUrl, "/api/knowledge", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ names: ["Alpha", "Beta"], acknowledgedCount: 2 })
+      }),
+      requestJson(baseUrl, "/api/knowledge/Solo", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ acknowledgedName: "Solo" })
+      })
+    ]);
+
+    assert.equal(batch.status, 200);
+    assert.equal(single.status, 200);
+    assert.deepEqual(calls, [
+      "knowledge:Alpha",
+      "start:Alpha",
+      "end:Alpha",
+      "knowledge:Beta",
+      "start:Beta",
+      "end:Beta",
+      "knowledge:Solo",
+      "start:Solo",
+      "end:Solo"
+    ]);
+  });
+});
