@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Database,
+  ListChecks,
   FileSearch,
   LoaderCircle,
   Network,
@@ -17,6 +18,7 @@ import {
 import { ContentRenderer } from "./ContentRenderer";
 import {
   deleteKnowledge,
+  deleteKnowledgeBatch,
   getImpact,
   getKnowledgePage,
   getShelves,
@@ -92,10 +94,15 @@ export function App() {
   const [selectedName, setSelectedName] = useState<string | null>(() => initialSearchParam("focus"));
   const [impact, setImpact] = useState<Impact | null>(null);
   const [impactLoading, setImpactLoading] = useState(false);
+  const [selection, setSelection] = useState<ReadonlySet<string>>(() => new Set());
   const [deleteTarget, setDeleteTarget] = useState<Impact | null>(null);
   const [deleteRelations, setDeleteRelations] = useState(false);
   const [acknowledgedName, setAcknowledgedName] = useState("");
   const [deleting, setDeleting] = useState(false);
+  const [batchTarget, setBatchTarget] = useState<string[] | null>(null);
+  const [batchRelations, setBatchRelations] = useState(false);
+  const [acknowledgedCount, setAcknowledgedCount] = useState("");
+  const [batchDeleting, setBatchDeleting] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
   const inspectRequest = useRef(0);
   const listRequest = useRef(0);
@@ -115,6 +122,7 @@ export function App() {
     setListLoading(true);
     setListError("");
     setItems([]);
+    setSelection(new Set());
     setCurrentCursor(cursor);
     setNextCursor(null);
     setCursorHistory(nextHistory);
@@ -181,6 +189,7 @@ export function App() {
       inspectRequest.current += 1;
       setView(location.view);
       setShelf(location.shelf);
+      setSelection(new Set());
       setSelectedName(location.focus);
       setImpact(null);
       setImpactLoading(false);
@@ -202,6 +211,26 @@ export function App() {
     }
     return { values: [...values].sort((left, right) => left.localeCompare(right)), hasGlobal };
   }, [items]);
+
+  // Read in page order and filtered through the rows on screen, so a name the
+  // page no longer carries cannot reach the delete request.
+  const selectedNames = useMemo(
+    () => items.filter((item) => selection.has(item.name)).map((item) => item.name),
+    [items, selection]
+  );
+  const allSelected = items.length > 0 && selectedNames.length === items.length;
+
+  function toggleRow(name: string) {
+    setSelection((current) => {
+      const next = new Set(current);
+      if (!next.delete(name)) next.add(name);
+      return next;
+    });
+  }
+
+  function toggleAllRows() {
+    setSelection((current) => current.size === items.length && items.length > 0 ? new Set() : new Set(items.map((item) => item.name)));
+  }
 
   const openImpact = useCallback(async (name: string) => {
     setSelectedName(name);
@@ -241,6 +270,7 @@ export function App() {
 
   function selectShelf(name: string) {
     setShelf(name);
+    setSelection(new Set());
     setSelectedName(null);
     setImpact(null);
     updateWorkspaceAddress(view, name, null);
@@ -286,6 +316,37 @@ export function App() {
       setNotice({ tone: "error", text: error instanceof Error ? error.message : "Delete operation failed." });
     } finally {
       setDeleting(false);
+    }
+  }
+
+  function openBatchDelete() {
+    if (selectedNames.length === 0) return;
+    setBatchTarget(selectedNames);
+    setBatchRelations(false);
+    setAcknowledgedCount("");
+  }
+
+  async function confirmBatchDelete() {
+    if (!batchTarget) return;
+    setBatchDeleting(true);
+    try {
+      const result = await deleteKnowledgeBatch(shelf, batchTarget, batchRelations, batchTarget.length);
+      setBatchTarget(null);
+      setSelectedName(null);
+      setImpact(null);
+      // A batch that ran is reported even when parts of it did not: the counts
+      // are what happened, and a failure makes the notice an error one.
+      const summary = "Deleted " + result.deletedCount + " record(s): " + result.deletedRelations
+        + " statement(s) removed, " + result.retainedRelations + " retained.";
+      const issues = result.missingCount + result.failedCount > 0
+        ? " " + result.missingCount + " were already gone and " + result.failedCount + " failed."
+        : "";
+      setNotice({ tone: result.failedCount > 0 ? "error" : "success", text: summary + issues });
+      await refreshKnowledge();
+    } catch (error) {
+      setNotice({ tone: "error", text: error instanceof Error ? error.message : "Bulk delete failed." });
+    } finally {
+      setBatchDeleting(false);
     }
   }
 
@@ -366,21 +427,55 @@ export function App() {
 
         {notice ? <div className={"notice notice-" + notice.tone} role="status"><span>{notice.text}</span><button type="button" className="notice-close" onClick={() => setNotice(null)} aria-label="Dismiss message"><X size={15} /></button></div> : null}
 
+        {view === "records" && selectedNames.length > 0 ? (
+          <div className="selection-bar" role="group" aria-label="Selected records">
+            <span className="selection-count"><ListChecks size={15} /> {selectedNames.length} selected</span>
+            <button type="button" className="text-button" onClick={() => setSelection(new Set())}>Clear selection</button>
+            <button type="button" className="danger-button" onClick={openBatchDelete}><Trash2 size={16} /> Delete selected</button>
+          </div>
+        ) : null}
+
         {view === "records" ? <section className="content-grid">
           <div ref={listPanelRef} className="knowledge-panel">
-            <div className="table-head"><span>Entry</span><span>Context</span><span>Created</span></div>
+            <div className="table-head">
+              <label className="row-select">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  disabled={items.length === 0}
+                  ref={(node) => { if (node) node.indeterminate = selectedNames.length > 0 && !allSelected; }}
+                  onChange={toggleAllRows}
+                  aria-label="Select every record on this page"
+                  title="Select every record on this page"
+                />
+              </label>
+              <span className="table-head-cells"><span>Entry</span><span>Context</span><span>Created</span></span>
+            </div>
             {listError && items.length === 0 ? <div className="blank-state error-state"><FileSearch size={24} /><p>{listError}</p></div> : null}
             {!listError && listLoading && items.length === 0 ? <div className="blank-state"><LoaderCircle size={26} className="spin" /><p>Loading knowledge records</p></div> : null}
             {!listError && !listLoading && items.length === 0 ? <div className="blank-state"><FileSearch size={26} /><p>No knowledge matches this view</p></div> : null}
             {items.map((item) => (
-              <button key={item.name} type="button" className={"knowledge-row " + (selectedName === item.name ? "is-selected" : "")} onClick={() => void openImpact(item.name)}>
-                <span className="knowledge-primary"><strong>{item.name}</strong><small>{excerpt(item.content.data)}</small></span>
-                <span className="row-context">
-                  <span className="tag-list">{item.content.tags.slice(0, 3).map((tag) => <em key={tag}>{tag}</em>)}</span>
-                  <span className="scope-list">{item.content.scopes.slice(0, 2).map((itemScope) => <i key={itemScope || "global"}>{scopeLabel(itemScope)}</i>)}</span>
-                </span>
-                <time dateTime={item.createdAt}>{dateLabel(item.createdAt)}</time>
-              </button>
+              <div
+                key={item.name}
+                className={"knowledge-row-wrap " + (selectedName === item.name ? "is-selected " : "") + (selection.has(item.name) ? "is-checked" : "")}
+              >
+                <label className="row-select">
+                  <input
+                    type="checkbox"
+                    checked={selection.has(item.name)}
+                    onChange={() => toggleRow(item.name)}
+                    aria-label={"Select " + item.name}
+                  />
+                </label>
+                <button type="button" className="knowledge-row" onClick={() => void openImpact(item.name)}>
+                  <span className="knowledge-primary"><strong>{item.name}</strong><small>{excerpt(item.content.data)}</small></span>
+                  <span className="row-context">
+                    <span className="tag-list">{item.content.tags.slice(0, 3).map((tag) => <em key={tag}>{tag}</em>)}</span>
+                    <span className="scope-list">{item.content.scopes.slice(0, 2).map((itemScope) => <i key={itemScope || "global"}>{scopeLabel(itemScope)}</i>)}</span>
+                  </span>
+                  <time dateTime={item.createdAt}>{dateLabel(item.createdAt)}</time>
+                </button>
+              </div>
             ))}
             {listError && items.length > 0 ? <p className="list-inline-error error-state">{listError}</p> : null}
           </div>
@@ -392,6 +487,28 @@ export function App() {
           </aside>
         </section> : <Suspense fallback={<section className="graph-loading"><LoaderCircle size={26} className="spin" /><span>Loading graph workspace</span></section>}><GraphView shelf={shelf} initialNodeName={selectedName || items[0]?.name || null} onFocusChange={openGraph} /></Suspense>}
       </main>
+
+      {batchTarget ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="delete-dialog" role="dialog" aria-modal="true" aria-labelledby="batch-delete-title">
+            <header>
+              <div><p className="eyebrow">DESTRUCTIVE BULK ACTION</p><h2 id="batch-delete-title">Delete selected entries</h2></div>
+              <button type="button" className="icon-button" onClick={() => setBatchTarget(null)} aria-label="Close bulk delete dialog" title="Close"><X size={18} /></button>
+            </header>
+            <p className="delete-copy">This removes the <strong>{batchTarget.length}</strong> selected entries from the selected shelf, one at a time. A batch is not a transaction: an entry that fails is skipped and reported, and entries already removed are not rolled back.</p>
+            <div className="impact-count"><ListChecks size={17} /><span>Entries to delete</span></div>
+            <ul className="name-list">{batchTarget.map((name) => <li key={name}>{name}</li>)}</ul>
+            <label className="check-line"><input type="checkbox" checked={batchRelations} onChange={(event) => setBatchRelations(event.target.checked)} /><span>Also delete the statements related to these entries</span></label>
+            <label className="confirmation-field"><span>Type <code>{batchTarget.length}</code> to confirm</span><input value={acknowledgedCount} onChange={(event) => setAcknowledgedCount(event.target.value)} inputMode="numeric" autoComplete="off" spellCheck="false" /></label>
+            <footer>
+              <button type="button" className="text-button" onClick={() => setBatchTarget(null)} disabled={batchDeleting}>Cancel</button>
+              <button type="button" className="danger-button" onClick={() => void confirmBatchDelete()} disabled={batchDeleting || acknowledgedCount.trim() !== String(batchTarget.length)}>
+                {batchDeleting ? <LoaderCircle size={16} className="spin" /> : <Trash2 size={16} />} Delete selected
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
 
       {deleteTarget ? (
         <div className="modal-backdrop" role="presentation">

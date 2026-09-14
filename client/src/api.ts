@@ -58,6 +58,23 @@ export interface GraphNodeResponse {
   edges: GraphEdge[];
 }
 
+export interface BatchDeleteOutcome {
+  name: string;
+  status: "deleted" | "missing" | "failed";
+  deletedRelations: number;
+  retainedRelations: number;
+  error: string;
+}
+
+export interface BatchDeleteResponse {
+  outcomes: BatchDeleteOutcome[];
+  deletedCount: number;
+  missingCount: number;
+  failedCount: number;
+  deletedRelations: number;
+  retainedRelations: number;
+}
+
 async function request<T>(input: string, init?: RequestInit): Promise<T> {
   const response = await fetch(input, init);
   const body = await response.json().catch(() => ({}));
@@ -98,5 +115,14 @@ export function deleteKnowledge(shelf: string, name: string, deleteRelations: bo
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ deleteRelations, acknowledgedName })
+  });
+}
+
+export function deleteKnowledgeBatch(shelf: string, names: string[], deleteRelations: boolean, acknowledgedCount: number): Promise<BatchDeleteResponse> {
+  const search = new URLSearchParams({ shelf });
+  return request("/api/knowledge?" + search.toString(), {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ names, deleteRelations, acknowledgedCount })
   });
 }

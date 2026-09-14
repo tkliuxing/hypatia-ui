@@ -64,6 +64,7 @@ function paramValue(request: Request, key: string): string {
 
 const SCAN_BATCH_SIZE = 200;
 const GRAPH_RELATION_LIMIT = 60;
+const MAX_BATCH_DELETE = 50;
 
 class RequestValidationError extends Error {
   constructor(message: string) {
@@ -83,6 +84,14 @@ interface KnowledgeCursor {
 interface IndexedKnowledge {
   knowledge: Knowledge;
   nextOffset: number;
+}
+
+interface BatchDeleteOutcome {
+  name: string;
+  status: "deleted" | "missing" | "failed";
+  deletedRelations: number;
+  retainedRelations: number;
+  error: string;
 }
 
 interface GraphNode {
@@ -132,6 +141,13 @@ function asyncRoute(handler: (request: Request, response: Response) => Promise<v
   return (request: Request, response: Response, next: NextFunction) => {
     handler(request, response).catch(next);
   };
+}
+
+function decodeNames(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  if (!value.every((item): item is string => typeof item === "string" && item !== "")) return null;
+  const names = [...new Set(value)];
+  return names.length === 0 || names.length > MAX_BATCH_DELETE ? null : names;
 }
 
 function graphEdgeId(relationship: Relationship): string {
@@ -236,6 +252,64 @@ export function createApp(hypatia: HypatiaService = defaultHypatiaService) {
     };
   }
 
+  // A batch is a loop, not a transaction: Hypatia has no multi-record write,
+  // so a record that is already gone or that fails is recorded and stepped
+  // over rather than abandoning the records behind it. Each impact is re-read
+  // right before its own removal, so a statement already taken out with an
+  // earlier record is neither deleted nor counted twice.
+  async function deleteKnowledgeBatch(shelf: string, names: string[], deleteRelations: boolean) {
+    const outcomes: BatchDeleteOutcome[] = [];
+    const deletedStatements = new Set<string>();
+    const retainedStatements = new Set<string>();
+
+    for (const name of names) {
+      try {
+        const impact = await findImpact(shelf, name);
+        if (!impact) {
+          outcomes.push({ name, status: "missing", deletedRelations: 0, retainedRelations: 0, error: "" });
+          continue;
+        }
+
+        let deletedRelations = 0;
+        for (const relationship of impact.relationships) {
+          if (!deleteRelations) {
+            retainedStatements.add(graphEdgeId(relationship));
+            continue;
+          }
+          await hypatia.deleteStatement(shelf, relationship);
+          deletedStatements.add(graphEdgeId(relationship));
+          deletedRelations += 1;
+        }
+        await hypatia.deleteKnowledge(shelf, name);
+
+        outcomes.push({
+          name,
+          status: "deleted",
+          deletedRelations,
+          retainedRelations: deleteRelations ? 0 : impact.relationships.length,
+          error: ""
+        });
+      } catch (error) {
+        outcomes.push({
+          name,
+          status: "failed",
+          deletedRelations: 0,
+          retainedRelations: 0,
+          error: error instanceof Error ? error.message : "Unexpected server error."
+        });
+      }
+    }
+
+    return {
+      outcomes,
+      deletedCount: outcomes.filter((outcome) => outcome.status === "deleted").length,
+      missingCount: outcomes.filter((outcome) => outcome.status === "missing").length,
+      failedCount: outcomes.filter((outcome) => outcome.status === "failed").length,
+      deletedRelations: deletedStatements.size,
+      retainedRelations: retainedStatements.size
+    };
+  }
+
   app.disable("x-powered-by");
   app.use(express.json({ limit: "32kb" }));
 
@@ -312,6 +386,28 @@ export function createApp(hypatia: HypatiaService = defaultHypatiaService) {
       return;
     }
     response.json({ name, ...result });
+  }));
+
+  app.delete("/api/knowledge", asyncRoute(async (request, response) => {
+    const shelf = queryValue(request, "shelf", "default");
+    const body = typeof request.body === "object" && request.body !== null ? request.body as Record<string, unknown> : {};
+    const names = decodeNames(body.names);
+    const deleteRelations = body.deleteRelations === true;
+
+    if (!names) {
+      response.status(400).json({ error: "Provide between 1 and " + MAX_BATCH_DELETE + " knowledge names to delete." });
+      return;
+    }
+
+    // The retyped count plays the part the retyped name plays for a single
+    // record, and is checked here so a caller that skips the dialog is
+    // refused the same way.
+    if (body.acknowledgedCount !== names.length) {
+      response.status(400).json({ error: "Enter the exact number of records to confirm deletion." });
+      return;
+    }
+
+    response.json(await queueMutation(() => deleteKnowledgeBatch(shelf, names, deleteRelations)));
   }));
 
   if (process.env.NODE_ENV === "production") {
