@@ -120,6 +120,20 @@ export function parseShelves(stdout: string): Shelf[] {
     });
 }
 
+// `scope list --json` (or `tag list --json`): [{"value": ..., "entries": N}].
+// The global scope stays the empty string, so a row without a string value is
+// dropped rather than read as it.
+export function parseValueList(stdout: string): string[] {
+  return parseCliRows(stdout)
+    .map((row) => row.value)
+    .filter((value): value is string => typeof value === "string");
+}
+
+// The argument parser's refusal of a subcommand this CLI build predates.
+export function isUnrecognizedSubcommand(error: unknown, subcommand: string): boolean {
+  return error instanceof HypatiaCliError && error.message.includes("unrecognized subcommand '" + subcommand + "'");
+}
+
 export function buildKnowledgeQuery(search: string, options?: { limit: number; offset: number }): unknown {
   const value = search.trim();
   const conditions: unknown[] = value ? [["$search", value]] : [];
@@ -193,6 +207,20 @@ export function runHypatia(args: string[]): Promise<{ stdout: string; stderr: st
 export async function queryHypatia(shelf: string, jse: unknown): Promise<JsonRecord[]> {
   const result = await runHypatia(["query", JSON.stringify(jse), "--shelf", shelf]);
   return parseCliRows(result.stdout);
+}
+
+// Every scope a shelf uses, or null when the CLI predates `scope list`. It
+// arrived after the 4.0.0 release, but builds that have it may still report
+// 4.0.0, so support is detected from the refusal, not from --version. The plain
+// listing prints the global scope as the label "(global)", so --json is read.
+export async function listScopes(shelf: string): Promise<string[] | null> {
+  try {
+    const result = await runHypatia(["scope", "list", "--json", "--shelf", shelf]);
+    return parseValueList(result.stdout);
+  } catch (error) {
+    if (isUnrecognizedSubcommand(error, "scope")) return null;
+    throw error;
+  }
 }
 
 export async function searchKnowledgeKeys(shelf: string, search: string, limit: number, offset: number): Promise<string[]> {

@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import {
+  HypatiaCliError,
   buildKnowledgeQuery,
   buildStatementQuery,
   filterKnowledge,
+  isUnrecognizedSubcommand,
+  listScopes,
   normalizeContent,
   normalizeKnowledge,
   normalizeStatement,
   parseCliObject,
   parseCliRows,
-  parseShelves
+  parseShelves,
+  parseValueList
 } from "../server/hypatia.js";
 
 test("parses Hypatia query rows and normalizes optional content fields", () => {
@@ -116,4 +123,63 @@ test("parses knowledge object sentinels and rejects malformed results", () => {
   assert.deepEqual(parseCliObject(JSON.stringify({ name: "Alpha" })), { name: "Alpha" });
   assert.throws(() => parseCliObject("[]"), /unexpected knowledge response/i);
   assert.throws(() => parseCliRows("{\"name\":\"Alpha\"}"), /unexpected query response/i);
+});
+
+test("reads scope list values and keeps the global scope as the empty string", () => {
+  assert.deepEqual(parseValueList('[\n  { "entries": 12, "value": "" },\n  { "entries": 8, "value": "hypatia" }\n]\n'), ["", "hypatia"]);
+  assert.deepEqual(parseValueList("[]\n"), []);
+  assert.deepEqual(parseValueList('[{"entries":1},{"value":null},{"value":"a"}]'), ["a"]);
+  assert.throws(() => parseValueList('["a"]'), HypatiaCliError);
+});
+
+test("recognizes only the refusal of the named subcommand", () => {
+  const refusal = new HypatiaCliError("error: unrecognized subcommand 'scope'\n\nUsage: hypatia [COMMAND]", 2);
+  assert.equal(isUnrecognizedSubcommand(refusal, "scope"), true);
+  assert.equal(isUnrecognizedSubcommand(refusal, "tag"), false);
+  assert.equal(isUnrecognizedSubcommand(new HypatiaCliError("Error: shelf error: shelf 'x' is not connected", 1), "scope"), false);
+  assert.equal(isUnrecognizedSubcommand(new Error("unrecognized subcommand 'scope'"), "scope"), false);
+});
+
+async function withFakeHypatia(script: string, run: () => Promise<void>): Promise<void> {
+  const directory = await mkdtemp(path.join(tmpdir(), "hypatia-archive-"));
+  const binary = path.join(directory, "hypatia");
+  const previous = process.env.HYPATIA_BIN;
+  await writeFile(binary, "#!/bin/sh\n" + script);
+  await chmod(binary, 0o755);
+  process.env.HYPATIA_BIN = binary;
+  try {
+    await run();
+  } finally {
+    if (previous === undefined) delete process.env.HYPATIA_BIN;
+    else process.env.HYPATIA_BIN = previous;
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+test("lists scopes through scope list --json on the requested shelf", async () => {
+  await withFakeHypatia(
+    'if [ "$*" = "scope list --json --shelf work" ]; then echo \'[{"value":"","entries":1},{"value":"a","entries":2}]\'; exit 0; fi\n'
+      + 'echo "unexpected arguments: $*" >&2; exit 1\n',
+    async () => {
+      assert.deepEqual(await listScopes("work"), ["", "a"]);
+    }
+  );
+});
+
+test("answers null for scopes when the CLI predates scope list", async () => {
+  await withFakeHypatia(
+    "printf \"error: unrecognized subcommand 'scope'\\n\\nUsage: hypatia [COMMAND]\\n\" >&2; exit 2\n",
+    async () => {
+      assert.equal(await listScopes("default"), null);
+    }
+  );
+});
+
+test("passes other scope list failures through", async () => {
+  await withFakeHypatia(
+    "echo \"Error: shelf error: shelf 'x' is not connected\" >&2; exit 1\n",
+    async () => {
+      await assert.rejects(listScopes("x"), /not connected/);
+    }
+  );
 });

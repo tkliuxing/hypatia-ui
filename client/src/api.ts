@@ -27,6 +27,12 @@ export interface Shelf {
   connected: boolean;
 }
 
+// supported is false when the CLI predates `hypatia scope list`.
+export interface ScopesResponse {
+  supported: boolean;
+  scopes: string[];
+}
+
 export interface KnowledgePage {
   items: Knowledge[];
   nextCursor: string | null;
@@ -86,6 +92,11 @@ async function request<T>(input: string, init?: RequestInit): Promise<T> {
 
 export function getShelves(): Promise<{ shelves: Shelf[] }> {
   return request("/api/shelves");
+}
+
+export function getScopes(shelf: string, signal?: AbortSignal): Promise<ScopesResponse> {
+  const search = new URLSearchParams({ shelf });
+  return request("/api/scopes?" + search.toString(), { signal });
 }
 
 export function getKnowledgePage(params: { shelf: string; q: string; tag: string; scope: string; cursor?: string; limit?: number; signal?: AbortSignal }): Promise<KnowledgePage> {

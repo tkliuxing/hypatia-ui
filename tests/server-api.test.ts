@@ -46,6 +46,7 @@ interface FakeOptions {
   calls?: string[];
   onDeleteKnowledge?: (name: string) => Promise<void>;
   runHypatia?: HypatiaService["runHypatia"];
+  listScopes?: HypatiaService["listScopes"];
 }
 
 function createFakeHypatia({
@@ -53,7 +54,8 @@ function createFakeHypatia({
   relationships = [],
   calls = [],
   onDeleteKnowledge,
-  runHypatia
+  runHypatia,
+  listScopes
 }: FakeOptions = {}): HypatiaService {
   const byName = new Map(records.map((item) => [item.name, item]));
 
@@ -75,6 +77,7 @@ function createFakeHypatia({
     }),
     getKnowledge: async (_shelf, name) => byName.get(name) || null,
     getRelationships: async (_shelf, name) => relationships.filter((item) => item.subject === name || item.object === name),
+    listScopes: listScopes || (async () => null),
     deleteStatement: async (_shelf, item) => {
       calls.push("statement:" + item.subject + ":" + item.predicate + ":" + item.object);
     },
@@ -282,6 +285,46 @@ test("missing impact and deletion targets return not found", async () => {
     });
     assert.equal(deletion.status, 404);
     assert.deepEqual(deletion.body, { error: "Knowledge entry was not found." });
+  });
+});
+
+test("scope roster reports every scope of the requested shelf", async () => {
+  const shelves: string[] = [];
+  const service = createFakeHypatia({
+    listScopes: async (shelf) => {
+      shelves.push(shelf);
+      return ["", "hypatia"];
+    }
+  });
+
+  await withServer(service, async (baseUrl) => {
+    const response = await requestJson(baseUrl, "/api/scopes?shelf=work");
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body, { supported: true, scopes: ["", "hypatia"] });
+    await requestJson(baseUrl, "/api/scopes");
+    assert.deepEqual(shelves, ["work", "default"]);
+  });
+});
+
+test("scope roster is unsupported when the CLI predates scope list", async () => {
+  await withServer(createFakeHypatia({ listScopes: async () => null }), async (baseUrl) => {
+    const response = await requestJson(baseUrl, "/api/scopes");
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body, { supported: false, scopes: [] });
+  });
+});
+
+test("a failing scope list becomes an API gateway error", async () => {
+  const service = createFakeHypatia({
+    listScopes: async () => {
+      throw new HypatiaCliError("Error: shelf error: shelf 'x' is not connected");
+    }
+  });
+
+  await withServer(service, async (baseUrl) => {
+    const response = await requestJson(baseUrl, "/api/scopes?shelf=x");
+    assert.equal(response.status, 502);
+    assert.deepEqual(response.body, { error: "Error: shelf error: shelf 'x' is not connected" });
   });
 });
 

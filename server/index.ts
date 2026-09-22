@@ -10,6 +10,7 @@ import {
   getKnowledge,
   getKnowledgeByNames,
   getRelationships,
+  listScopes,
   normalizeKnowledge,
   parseShelves,
   queryHypatia,
@@ -26,6 +27,7 @@ export interface HypatiaService {
   getKnowledgeByNames: typeof getKnowledgeByNames;
   getKnowledge: typeof getKnowledge;
   getRelationships: typeof getRelationships;
+  listScopes: typeof listScopes;
   deleteStatement: typeof deleteStatement;
   deleteKnowledge: typeof deleteKnowledge;
 }
@@ -37,6 +39,7 @@ const defaultHypatiaService: HypatiaService = {
   getKnowledgeByNames,
   getKnowledge,
   getRelationships,
+  listScopes,
   deleteStatement,
   deleteKnowledge
 };
@@ -321,6 +324,11 @@ export function createApp(hypatia: HypatiaService = defaultHypatiaService) {
   app.get("/api/shelves", asyncRoute(async (_request, response) => {
     const result = await hypatia.runHypatia(["list"]);
     response.json({ shelves: parseShelves(result.stdout) });
+  }));
+
+  app.get("/api/scopes", asyncRoute(async (request, response) => {
+    const scopes = await hypatia.listScopes(queryValue(request, "shelf", "default"));
+    response.json(scopes === null ? { supported: false, scopes: [] } : { supported: true, scopes });
   }));
 
   app.get("/api/knowledge", asyncRoute(async (request, response) => {
