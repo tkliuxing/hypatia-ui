@@ -21,12 +21,14 @@ import {
   deleteKnowledgeBatch,
   getImpact,
   getKnowledgePage,
+  getScopes,
   getShelves,
   type Impact,
   type Knowledge,
   type Relationship,
   type Shelf
 } from "./api";
+import { GLOBAL_SCOPE_TOKEN, scopeOptions, type ScopeRoster } from "./scopeOptions";
 
 const GraphView = lazy(() => import("./GraphView").then(({ GraphView: Component }) => ({ default: Component })));
 
@@ -84,6 +86,7 @@ export function App() {
   const [tagInput, setTagInput] = useState("");
   const [scopeInput, setScopeInput] = useState("");
   const [filters, setFilters] = useState({ q: "", tag: "", scope: "" });
+  const [scopeRoster, setScopeRoster] = useState<ScopeRoster | null>(null);
   const [items, setItems] = useState<Knowledge[]>([]);
   const [currentCursor, setCurrentCursor] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -107,6 +110,7 @@ export function App() {
   const inspectRequest = useRef(0);
   const listRequest = useRef(0);
   const listController = useRef<AbortController | null>(null);
+  const scopesController = useRef<AbortController | null>(null);
   const listPanelRef = useRef<HTMLDivElement>(null);
   const inspectorRef = useRef<HTMLElement>(null);
 
@@ -148,6 +152,27 @@ export function App() {
 
   const refreshKnowledge = useCallback(() => loadKnowledgePage(null, [], 1), [loadKnowledgePage]);
 
+  const loadScopes = useCallback(async () => {
+    scopesController.current?.abort();
+    const controller = new AbortController();
+    scopesController.current = controller;
+    try {
+      const roster = await getScopes(shelf, controller.signal);
+      if (!controller.signal.aborted) setScopeRoster({ shelf, scopes: roster.supported ? roster.scopes : null });
+    } catch {
+      // No notice: without the roster the options fall back to the page.
+      if (!controller.signal.aborted) setScopeRoster({ shelf, scopes: null });
+    }
+  }, [shelf]);
+
+  // The page first: the host runs one CLI call at a time, and the roster scan
+  // should not hold up the rows.
+  const reload = useCallback(async () => {
+    const page = refreshKnowledge();
+    void loadScopes();
+    await page;
+  }, [loadScopes, refreshKnowledge]);
+
   const previousPage = useCallback(() => {
     if (listLoading || cursorHistory.length === 0) return;
     const previousCursor = cursorHistory.at(-1) || null;
@@ -181,7 +206,15 @@ export function App() {
     void refreshKnowledge();
   }, [refreshKnowledge]);
 
-  useEffect(() => () => listController.current?.abort(), []);
+  // The roster covers the whole shelf, so it follows the shelf, not the page.
+  useEffect(() => {
+    void loadScopes();
+  }, [loadScopes]);
+
+  useEffect(() => () => {
+    listController.current?.abort();
+    scopesController.current?.abort();
+  }, []);
 
   useEffect(() => {
     function restoreWorkspaceFromHistory() {
@@ -200,17 +233,10 @@ export function App() {
     return () => window.removeEventListener("popstate", restoreWorkspaceFromHistory);
   }, []);
 
-  const availableScopes = useMemo(() => {
-    const values = new Set<string>();
-    let hasGlobal = false;
-    for (const item of items) {
-      for (const itemScope of item.content.scopes) {
-        if (itemScope === "") hasGlobal = true;
-        else values.add(itemScope);
-      }
-    }
-    return { values: [...values].sort((left, right) => left.localeCompare(right)), hasGlobal };
-  }, [items]);
+  const availableScopes = useMemo(
+    () => scopeOptions(scopeRoster, shelf, items, scopeInput),
+    [items, scopeInput, scopeRoster, shelf]
+  );
 
   // Read in page order and filtered through the rows on screen, so a name the
   // page no longer carries cannot reach the delete request.
@@ -311,7 +337,7 @@ export function App() {
         ? "Deleted " + result.name + " and " + result.deletedRelations + " related statement(s)."
         : "Deleted " + result.name + ". " + result.retainedRelations + " related statement(s) remain.";
       setNotice({ tone: "success", text });
-      await refreshKnowledge();
+      await reload();
     } catch (error) {
       setNotice({ tone: "error", text: error instanceof Error ? error.message : "Delete operation failed." });
     } finally {
@@ -342,7 +368,7 @@ export function App() {
         ? " " + result.missingCount + " were already gone and " + result.failedCount + " failed."
         : "";
       setNotice({ tone: result.failedCount > 0 ? "error" : "success", text: summary + issues });
-      await refreshKnowledge();
+      await reload();
     } catch (error) {
       setNotice({ tone: "error", text: error instanceof Error ? error.message : "Bulk delete failed." });
     } finally {
@@ -391,7 +417,7 @@ export function App() {
               <button className={"view-tab " + (view === "records" ? "is-active" : "")} type="button" role="tab" aria-selected={view === "records"} onClick={() => switchWorkspace("records")}>Records</button>
               <button className={"view-tab " + (view === "graph" ? "is-active" : "")} type="button" role="tab" aria-selected={view === "graph"} onClick={() => switchWorkspace("graph")}><Network size={15} /> Graph</button>
             </div>
-            <button className="icon-button" type="button" title="Refresh knowledge" aria-label="Refresh knowledge" onClick={() => void refreshKnowledge()} disabled={listLoading}>
+            <button className="icon-button" type="button" title="Refresh knowledge" aria-label="Refresh knowledge" onClick={() => void reload()} disabled={listLoading}>
               <RefreshCw size={18} className={listLoading ? "spin" : ""} />
             </button>
           </div>
@@ -408,7 +434,7 @@ export function App() {
               <span>Scope</span>
               <select value={scopeInput} onChange={(event) => setScopeInput(event.target.value)}>
                 <option value="">Any scope</option>
-                {availableScopes.hasGlobal ? <option value="__global__">global</option> : null}
+                {availableScopes.hasGlobal ? <option value={GLOBAL_SCOPE_TOKEN}>global</option> : null}
                 {availableScopes.values.map((value) => <option key={value} value={value}>{value}</option>)}
               </select>
             </label>

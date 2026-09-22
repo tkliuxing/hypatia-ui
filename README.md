@@ -24,7 +24,7 @@ npx --yes hypatia-archive --no-open
 ## What It Does
 
 - Lists registered Hypatia shelves and works with the selected connected shelf.
-- Searches knowledge with Hypatia's JSE full-text query, then filters locally by tag and scope.
+- Searches knowledge with Hypatia's JSE full-text query, then filters locally by tag and scope. The scope filter offers every scope the shelf uses, read with `hypatia scope list`; a Hypatia build without that command (the 4.0.0 release and earlier) offers only the scopes of the loaded page. Support is detected at run time, not from the version number: builds from Hypatia's main branch that have the command still report 4.0.0. The roster counts statements too, so a scope that only statements carry is offered and filters the record list to nothing.
 - Opens the complete knowledge record with its direct incoming and outgoing statements.
 - Maps a focused local neighborhood in the Graph workspace, including statement references whose knowledge record has been deleted.
 - Lets users inspect nodes and directed relationships, expand a node's immediate relations, and refocus the map with the toolbar control or a double-click/tap.
