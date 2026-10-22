@@ -7,17 +7,21 @@ import {
   deleteKnowledge,
   deleteStatement,
   filterKnowledge,
+  findSimilarKnowledge,
   getKnowledge,
   getKnowledgeByNames,
   getRelationships,
+  isSemanticUnavailable,
   listScopes,
+  listTags,
   normalizeKnowledge,
   parseShelves,
   queryHypatia,
   runHypatia,
   searchKnowledgeKeys,
   type Knowledge,
-  type Relationship
+  type Relationship,
+  type SimilarKnowledge
 } from "./hypatia.js";
 
 export interface HypatiaService {
@@ -27,7 +31,9 @@ export interface HypatiaService {
   getKnowledgeByNames: typeof getKnowledgeByNames;
   getKnowledge: typeof getKnowledge;
   getRelationships: typeof getRelationships;
+  findSimilarKnowledge: typeof findSimilarKnowledge;
   listScopes: typeof listScopes;
+  listTags: typeof listTags;
   deleteStatement: typeof deleteStatement;
   deleteKnowledge: typeof deleteKnowledge;
 }
@@ -39,7 +45,9 @@ const defaultHypatiaService: HypatiaService = {
   getKnowledgeByNames,
   getKnowledge,
   getRelationships,
+  findSimilarKnowledge,
   listScopes,
+  listTags,
   deleteStatement,
   deleteKnowledge
 };
@@ -329,6 +337,57 @@ export function createApp(hypatia: HypatiaService = defaultHypatiaService) {
   app.get("/api/scopes", asyncRoute(async (request, response) => {
     const scopes = await hypatia.listScopes(queryValue(request, "shelf", "default"));
     response.json(scopes === null ? { supported: false, scopes: [] } : { supported: true, scopes });
+  }));
+
+  app.get("/api/tags", asyncRoute(async (request, response) => {
+    const tags = await hypatia.listTags(queryValue(request, "shelf", "default"));
+    response.json(tags === null ? { supported: false, tags: [] } : { supported: true, tags });
+  }));
+
+  // Vector search. A shelf without an embedding model answers supported: false
+  // rather than failing the request, because that is a shelf state the UI can
+  // explain. The tag and scope filters run here so they keep the same substring
+  // semantics the record list uses.
+  app.get("/api/similar", asyncRoute(async (request, response) => {
+    const shelf = queryValue(request, "shelf", "default");
+    const search = queryValue(request, "q").trim();
+    if (!search) {
+      response.status(400).json({ error: "A semantic search needs a query." });
+      return;
+    }
+    const tag = queryValue(request, "tag");
+    const scope = queryValue(request, "scope");
+    const limit = limitValue(request);
+
+    // A scope is exact membership, the same rule `$contains` applies, so it is
+    // pushed into the CLI to widen the pool before ranking. Tag matching is a
+    // substring rule that only the local filter can apply, so a tag-filtered
+    // search asks for more candidates than it shows.
+    const scopeValue = scope && scope !== "__global__" ? scope : "";
+    const candidates = tag ? Math.min(Math.max(limit * 4, 50), 200) : limit;
+
+    let hits: SimilarKnowledge[];
+    try {
+      hits = await hypatia.findSimilarKnowledge(
+        shelf,
+        search,
+        candidates,
+        scopeValue ? { where: ["$contains", "scopes", scopeValue] } : undefined
+      );
+    } catch (error) {
+      if (!isSemanticUnavailable(error)) throw error;
+      // The CLI prefixes its explanation with "Error:"; the panel shows it as
+      // a shelf state, so the label is dropped.
+      const reason = error instanceof Error ? error.message.replace(/^Error:\s*/i, "") : "";
+      response.json({ supported: false, reason, items: [] });
+      return;
+    }
+
+    const distances = new Map(hits.map((hit) => [hit.knowledge.name, hit.distance]));
+    const items = filterKnowledge(hits.map((hit) => hit.knowledge), tag, scope)
+      .slice(0, limit)
+      .map((knowledge) => ({ ...knowledge, distance: distances.get(knowledge.name) ?? null }));
+    response.json({ supported: true, reason: "", items });
   }));
 
   app.get("/api/knowledge", asyncRoute(async (request, response) => {

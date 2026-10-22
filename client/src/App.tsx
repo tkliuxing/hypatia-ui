@@ -23,17 +23,22 @@ import {
   getKnowledgePage,
   getScopes,
   getShelves,
+  getSimilar,
+  getTags,
   type Impact,
   type Knowledge,
   type Relationship,
   type Shelf
 } from "./api";
 import { GLOBAL_SCOPE_TOKEN, scopeOptions, type ScopeRoster } from "./scopeOptions";
+import { tagOptions, type TagRoster } from "./tagOptions";
 
 const GraphView = lazy(() => import("./GraphView").then(({ GraphView: Component }) => ({ default: Component })));
 
 type Notice = { tone: "success" | "error"; text: string } | null;
 type WorkspaceView = "records" | "graph";
+type SearchMode = "keyword" | "semantic";
+type KnowledgeRow = Knowledge & { distance?: number | null };
 
 function initialSearchParam(name: string): string | null {
   return new URLSearchParams(window.location.search).get(name);
@@ -63,6 +68,10 @@ function dateLabel(value: string): string {
   return value ? value.replace("T", " ").slice(0, 16) : "Unknown date";
 }
 
+function distanceLabel(value: number | null | undefined): string {
+  return typeof value === "number" ? value.toFixed(3) : "—";
+}
+
 function excerpt(value: string, maximum = 180): string {
   const compact = value.replace(/\s+/g, " ").trim();
   return compact.length > maximum ? compact.slice(0, maximum) + "..." : compact || "No content";
@@ -86,14 +95,17 @@ export function App() {
   const [tagInput, setTagInput] = useState("");
   const [scopeInput, setScopeInput] = useState("");
   const [filters, setFilters] = useState({ q: "", tag: "", scope: "" });
+  const [searchMode, setSearchMode] = useState<SearchMode>("keyword");
   const [scopeRoster, setScopeRoster] = useState<ScopeRoster | null>(null);
-  const [items, setItems] = useState<Knowledge[]>([]);
+  const [tagRoster, setTagRoster] = useState<TagRoster | null>(null);
+  const [items, setItems] = useState<KnowledgeRow[]>([]);
   const [currentCursor, setCurrentCursor] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [cursorHistory, setCursorHistory] = useState<Array<string | null>>([]);
   const [pageNumber, setPageNumber] = useState(1);
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState("");
+  const [semanticError, setSemanticError] = useState("");
   const [selectedName, setSelectedName] = useState<string | null>(() => initialSearchParam("focus"));
   const [impact, setImpact] = useState<Impact | null>(null);
   const [impactLoading, setImpactLoading] = useState(false);
@@ -111,6 +123,7 @@ export function App() {
   const listRequest = useRef(0);
   const listController = useRef<AbortController | null>(null);
   const scopesController = useRef<AbortController | null>(null);
+  const tagsController = useRef<AbortController | null>(null);
   const listPanelRef = useRef<HTMLDivElement>(null);
   const inspectorRef = useRef<HTMLElement>(null);
 
@@ -150,7 +163,48 @@ export function App() {
     }
   }, [filters, shelf]);
 
-  const refreshKnowledge = useCallback(() => loadKnowledgePage(null, [], 1), [loadKnowledgePage]);
+  // Semantic search returns the nearest entries in one shot, so it has no
+  // cursor and no page history. A blank query is not sent: vector search has no
+  // meaningful "everything" ordering to fall back to.
+  const loadSimilar = useCallback(async () => {
+    listController.current?.abort();
+    const controller = new AbortController();
+    const requestId = ++listRequest.current;
+    listController.current = controller;
+    const query = filters.q.trim();
+
+    setSemanticError("");
+    setListError("");
+    setSelection(new Set());
+    setItems([]);
+    setCurrentCursor(null);
+    setNextCursor(null);
+    setCursorHistory([]);
+    setPageNumber(1);
+
+    if (!query) {
+      setListLoading(false);
+      return;
+    }
+
+    setListLoading(true);
+    try {
+      const result = await getSimilar({ shelf, q: query, tag: filters.tag, scope: filters.scope, limit: 50, signal: controller.signal });
+      if (requestId !== listRequest.current) return;
+      setItems(result.items);
+      if (!result.supported) setSemanticError(result.reason || "This shelf has no embedding model.");
+    } catch (error) {
+      if (controller.signal.aborted || requestId !== listRequest.current) return;
+      setListError(error instanceof Error ? error.message : "Unable to run a semantic search.");
+    } finally {
+      if (requestId === listRequest.current) setListLoading(false);
+    }
+  }, [filters, shelf]);
+
+  const refreshKnowledge = useCallback(() => {
+    if (searchMode === "semantic") return loadSimilar();
+    return loadKnowledgePage(null, [], 1);
+  }, [loadKnowledgePage, loadSimilar, searchMode]);
 
   const loadScopes = useCallback(async () => {
     scopesController.current?.abort();
@@ -165,13 +219,27 @@ export function App() {
     }
   }, [shelf]);
 
-  // The page first: the host runs one CLI call at a time, and the roster scan
-  // should not hold up the rows.
+  const loadTags = useCallback(async () => {
+    tagsController.current?.abort();
+    const controller = new AbortController();
+    tagsController.current = controller;
+    try {
+      const roster = await getTags(shelf, controller.signal);
+      if (!controller.signal.aborted) setTagRoster({ shelf, tags: roster.supported ? roster.tags : null });
+    } catch {
+      // Without a roster the tag box stays free text, which still filters.
+      if (!controller.signal.aborted) setTagRoster({ shelf, tags: null });
+    }
+  }, [shelf]);
+
+  // The page first: a roster scan over the whole shelf should not hold up the
+  // rows, and the CLI bridge still runs one call at a time.
   const reload = useCallback(async () => {
     const page = refreshKnowledge();
     void loadScopes();
+    void loadTags();
     await page;
-  }, [loadScopes, refreshKnowledge]);
+  }, [loadScopes, loadTags, refreshKnowledge]);
 
   const previousPage = useCallback(() => {
     if (listLoading || cursorHistory.length === 0) return;
@@ -206,14 +274,16 @@ export function App() {
     void refreshKnowledge();
   }, [refreshKnowledge]);
 
-  // The roster covers the whole shelf, so it follows the shelf, not the page.
+  // The rosters cover the whole shelf, so they follow the shelf, not the page.
   useEffect(() => {
     void loadScopes();
-  }, [loadScopes]);
+    void loadTags();
+  }, [loadScopes, loadTags]);
 
   useEffect(() => () => {
     listController.current?.abort();
     scopesController.current?.abort();
+    tagsController.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -236,6 +306,10 @@ export function App() {
   const availableScopes = useMemo(
     () => scopeOptions(scopeRoster, shelf, items, scopeInput),
     [items, scopeInput, scopeRoster, shelf]
+  );
+  const availableTags = useMemo(
+    () => tagOptions(tagRoster, shelf, tagInput),
+    [tagInput, tagRoster, shelf]
   );
 
   // Read in page order and filtered through the rows on screen, so a name the
@@ -302,8 +376,21 @@ export function App() {
     updateWorkspaceAddress(view, name, null);
   }
 
+  function switchSearchMode(mode: SearchMode) {
+    if (mode === searchMode) return;
+    setSearchMode(mode);
+    setSelectedName(null);
+    setImpact(null);
+    setSelection(new Set());
+    setNotice(null);
+  }
+
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (searchMode === "semantic" && !queryInput.trim()) {
+      setNotice({ tone: "error", text: "A semantic search needs a query." });
+      return;
+    }
     setSelectedName(null);
     setImpact(null);
     setFilters({ q: queryInput.trim(), tag: tagInput.trim(), scope: scopeInput });
@@ -424,12 +511,30 @@ export function App() {
         </header>
 
         <section className="search-band" aria-label="Knowledge search">
+          <div className="search-mode" role="group" aria-label="Search mode">
+            <button type="button" className={"mode-tab " + (searchMode === "keyword" ? "is-active" : "")} aria-pressed={searchMode === "keyword"} onClick={() => switchSearchMode("keyword")}>Keyword</button>
+            <button type="button" className={"mode-tab " + (searchMode === "semantic" ? "is-active" : "")} aria-pressed={searchMode === "semantic"} onClick={() => switchSearchMode("semantic")}>Semantic</button>
+            <span className="mode-hint">{searchMode === "semantic"
+              ? "Vector search over this shelf; session and log entries are skipped. It loads the embedding model, so a run can take a second."
+              : "Full-text search on names, content, tags, and synonyms."}</span>
+          </div>
           <form onSubmit={submitSearch}>
             <label className="search-field">
               <Search size={19} aria-hidden="true" />
-              <input value={queryInput} onChange={(event) => setQueryInput(event.target.value)} placeholder="Search names, content, tags, and synonyms" aria-label="Search knowledge" />
+              <input
+                value={queryInput}
+                onChange={(event) => setQueryInput(event.target.value)}
+                placeholder={searchMode === "semantic" ? "Describe what you are looking for" : "Search names, content, tags, and synonyms"}
+                aria-label="Search knowledge"
+              />
             </label>
-            <label className="compact-field"><span>Tag</span><input value={tagInput} onChange={(event) => setTagInput(event.target.value)} placeholder="Any tag" /></label>
+            <label className="compact-field">
+              <span>Tag</span>
+              <input value={tagInput} onChange={(event) => setTagInput(event.target.value)} placeholder="Any tag" list="tag-options" />
+              <datalist id="tag-options">
+                {availableTags.map((tag) => <option key={tag} value={tag} />)}
+              </datalist>
+            </label>
             <label className="compact-field">
               <span>Scope</span>
               <select value={scopeInput} onChange={(event) => setScopeInput(event.target.value)}>
@@ -442,11 +547,17 @@ export function App() {
             <button className="text-button" type="button" onClick={resetSearch}>Reset</button>
           </form>
           <div className="result-summary">
-            <span>{listLoading && items.length === 0 ? "Loading page" : "Page " + pageNumber}</span>
+            <span>{listLoading && items.length === 0
+              ? (searchMode === "semantic" ? "Searching" : "Loading page")
+              : (searchMode === "semantic" ? "Semantic results" : "Page " + pageNumber)}</span>
             <div className="page-controls" aria-label="Knowledge page navigation">
-              <span className="page-count" aria-live="polite">{items.length + " records"}</span>
-              <button className="icon-button pager-button" type="button" title="Previous page" aria-label="Previous page" onClick={previousPage} disabled={listLoading || cursorHistory.length === 0}><ChevronLeft size={17} /></button>
-              <button className="icon-button pager-button" type="button" title="Next page" aria-label="Next page" onClick={nextPage} disabled={listLoading || !nextCursor}><ChevronRight size={17} /></button>
+              <span className="page-count" aria-live="polite">{items.length + (searchMode === "semantic" ? " nearest" : " records")}</span>
+              {searchMode === "semantic" ? null : (
+                <>
+                  <button className="icon-button pager-button" type="button" title="Previous page" aria-label="Previous page" onClick={previousPage} disabled={listLoading || cursorHistory.length === 0}><ChevronLeft size={17} /></button>
+                  <button className="icon-button pager-button" type="button" title="Next page" aria-label="Next page" onClick={nextPage} disabled={listLoading || !nextCursor}><ChevronRight size={17} /></button>
+                </>
+              )}
             </div>
           </div>
         </section>
@@ -475,11 +586,15 @@ export function App() {
                   title="Select every record on this page"
                 />
               </label>
-              <span className="table-head-cells"><span>Entry</span><span>Context</span><span>Created</span></span>
+              <span className="table-head-cells"><span>Entry</span><span>Context</span><span>{searchMode === "semantic" ? "Distance" : "Created"}</span></span>
             </div>
             {listError && items.length === 0 ? <div className="blank-state error-state"><FileSearch size={24} /><p>{listError}</p></div> : null}
             {!listError && listLoading && items.length === 0 ? <div className="blank-state"><LoaderCircle size={26} className="spin" /><p>Loading knowledge records</p></div> : null}
-            {!listError && !listLoading && items.length === 0 ? <div className="blank-state"><FileSearch size={26} /><p>No knowledge matches this view</p></div> : null}
+            {!listError && !listLoading && items.length === 0 ? (
+              <div className="blank-state"><FileSearch size={26} /><p>{searchMode === "semantic"
+                ? (semanticError || (filters.q ? "No entries in the vector index are close to this query" : "Type what you are looking for, then run a semantic search"))
+                : "No knowledge matches this view"}</p></div>
+            ) : null}
             {items.map((item) => (
               <div
                 key={item.name}
@@ -496,10 +611,13 @@ export function App() {
                 <button type="button" className="knowledge-row" onClick={() => void openImpact(item.name)}>
                   <span className="knowledge-primary"><strong>{item.name}</strong><small>{excerpt(item.content.data)}</small></span>
                   <span className="row-context">
+                    {item.content.embed === false ? <span className="embed-flag" title="Excluded from the vector index; keyword search still finds it.">not embedded</span> : null}
                     <span className="tag-list">{item.content.tags.slice(0, 3).map((tag) => <em key={tag}>{tag}</em>)}</span>
                     <span className="scope-list">{item.content.scopes.slice(0, 2).map((itemScope) => <i key={itemScope || "global"}>{scopeLabel(itemScope)}</i>)}</span>
                   </span>
-                  <time dateTime={item.createdAt}>{dateLabel(item.createdAt)}</time>
+                  {searchMode === "semantic"
+                    ? <span className="similarity" title="Cosine distance; lower is closer">{distanceLabel(item.distance)}</span>
+                    : <time dateTime={item.createdAt}>{dateLabel(item.createdAt)}</time>}
                 </button>
               </div>
             ))}
@@ -572,7 +690,11 @@ function Inspector({ impact, onDelete, onOpenGraph }: { impact: Impact; onDelete
           <button type="button" className="icon-button danger-icon" onClick={onDelete} title="Delete this knowledge entry" aria-label="Delete this knowledge entry"><Trash2 size={17} /></button>
         </div>
       </div>
-      <div className="metadata-line"><span>{knowledge.content.format}</span><span>{dateLabel(knowledge.createdAt)}</span></div>
+      <div className="metadata-line">
+        <span>{knowledge.content.format}</span>
+        {knowledge.content.embed === false ? <span className="embed-flag" title="Excluded from the vector index; keyword search still finds it.">not embedded</span> : null}
+        <span>{dateLabel(knowledge.createdAt)}</span>
+      </div>
       <ContentRenderer content={knowledge.content} emptyMessage="No stored content." />
       <div className="metadata-groups">
         <div><p><Tags size={14} /> Tags</p><div className="chip-wrap">{knowledge.content.tags.length ? knowledge.content.tags.map((tag) => <span className="chip tag-chip" key={tag}>{tag}</span>) : <span className="muted">None</span>}</div></div>

@@ -8,8 +8,11 @@ import {
   buildKnowledgeQuery,
   buildStatementQuery,
   filterKnowledge,
+  findSimilarKnowledge,
+  isSemanticUnavailable,
   isUnrecognizedSubcommand,
   listScopes,
+  listTags,
   normalizeContent,
   normalizeKnowledge,
   normalizeStatement,
@@ -182,4 +185,83 @@ test("passes other scope list failures through", async () => {
       await assert.rejects(listScopes("x"), /not connected/);
     }
   );
+});
+
+test("keeps an explicit vector-index opt-out and drops an unset flag", () => {
+  assert.equal(normalizeContent({ data: "x", embed: false }).embed, false);
+  assert.equal(normalizeContent({ data: "x", embed: true }).embed, undefined);
+  assert.equal(normalizeContent({ data: "x" }).embed, undefined);
+});
+
+test("lists tags through tag list --json on the requested shelf", async () => {
+  await withFakeHypatia(
+    `if [ "$*" = "tag list --json --shelf work" ]; then
+  echo '[{"value":"memory","entries":2},{"value":"rule","entries":1}]'
+  exit 0
+fi
+echo "unexpected arguments: $*" >&2
+exit 1
+`,
+    async () => {
+      assert.deepEqual(await listTags("work"), ["memory", "rule"]);
+    }
+  );
+});
+
+test("answers null for tags when the CLI predates tag list", async () => {
+  await withFakeHypatia(
+    `printf "error: unrecognized subcommand 'tag'\\n\\nUsage: hypatia [COMMAND]\\n" >&2
+exit 2
+`,
+    async () => {
+      assert.equal(await listTags("default"), null);
+    }
+  );
+});
+
+test("resolves similar rows back to knowledge records in distance order", async () => {
+  const script = `if [ "$*" = "similar close --target knowledge --limit 2 --exclude-tags message,session,summary,hypatia-dream-run,system --shelf work" ]; then
+  echo '[{"name":"Beta","distance":0.34,"content":{}},{"name":"Alpha","distance":0.12,"content":{}},{"name":"Gone","distance":0.5,"content":{}}]'
+  exit 0
+fi
+if [ "$1" = "query" ]; then
+  echo '[{"name":"Alpha","created_at":"2026-01-01 00:00:00","content":{"data":"a"}},{"name":"Beta","created_at":"2026-01-02 00:00:00","content":{"data":"b"}}]'
+  exit 0
+fi
+echo "unexpected arguments: $*" >&2
+exit 1
+`;
+
+  await withFakeHypatia(script, async () => {
+    const hits = await findSimilarKnowledge("work", "close", 2);
+    assert.deepEqual(hits.map((hit) => [hit.knowledge.name, hit.distance]), [["Beta", 0.34], ["Alpha", 0.12]]);
+  });
+});
+
+test("recognizes only the embedding-model refusal as an unsupported shelf", () => {
+  assert.equal(isSemanticUnavailable(new HypatiaCliError("Error: model unavailable: semantic search is off on shelf 'default'")), true);
+  assert.equal(isSemanticUnavailable(new HypatiaCliError("Error: semantic search is off on shelf 'x'")), true);
+  assert.equal(isSemanticUnavailable(new HypatiaCliError("Error: shelf error: shelf 'x' is not connected")), false);
+  assert.equal(isSemanticUnavailable(new Error("model unavailable")), false);
+});
+
+test("passes a scope condition to similar as a where clause", async () => {
+  const script = `if [ "$1" = "query" ]; then
+  echo '[{"name":"Alpha","created_at":"2026-01-01 00:00:00","content":{}}]'
+  exit 0
+fi
+for arg in "$@"; do
+  if [ "$arg" = '["$contains","scopes","p"]' ]; then
+    echo '[{"name":"Alpha","distance":0.2,"content":{}}]'
+    exit 0
+  fi
+done
+echo "no where clause: $*" >&2
+exit 1
+`;
+
+  await withFakeHypatia(script, async () => {
+    const hits = await findSimilarKnowledge("work", "close", 2, { where: ["$contains", "scopes", "p"] });
+    assert.deepEqual(hits.map((hit) => hit.knowledge.name), ["Alpha"]);
+  });
 });

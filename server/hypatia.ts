@@ -12,6 +12,9 @@ export interface KnowledgeContent {
   tags: string[];
   scopes: string[];
   figures: string[];
+  // Only carried when the shelf says the entry is out of the vector index.
+  // A missing field means the CLI did not report it, not that it is indexed.
+  embed?: boolean;
 }
 
 export interface Knowledge {
@@ -59,13 +62,15 @@ function asStringArray(value: unknown): string[] {
 
 export function normalizeContent(value: unknown): KnowledgeContent {
   const source = isRecord(value) ? value : {};
-  return {
+  const content: KnowledgeContent = {
     data: asString(source.data),
     format: asString(source.format) || "markdown",
     tags: asStringArray(source.tags),
     scopes: asStringArray(source.scopes),
     figures: asStringArray(source.figures)
   };
+  if (source.embed === false) content.embed = false;
+  return content;
 }
 
 export function normalizeKnowledge(value: JsonRecord): Knowledge {
@@ -198,6 +203,12 @@ function executeHypatia(args: string[]): Promise<{ stdout: string; stderr: strin
   });
 }
 
+// Hypatia's shelf store is safe for concurrent processes (SQLite runs WAL with
+// a five-second busy timeout; PostgreSQL serializes on its own), so this queue
+// is a throughput choice, not a correctness requirement. It stays because
+// every command runs schema setup and an embedding-debt flush on open, both of
+// which take a short write lock, and a cold `similar` call loads a model the
+// next queued call would only load again.
 export function runHypatia(args: string[]): Promise<{ stdout: string; stderr: string }> {
   const run = commandTail.then(() => executeHypatia(args), () => executeHypatia(args));
   commandTail = run.then(() => undefined, () => undefined);
@@ -209,16 +220,28 @@ export async function queryHypatia(shelf: string, jse: unknown): Promise<JsonRec
   return parseCliRows(result.stdout);
 }
 
-// Every scope a shelf uses, or null when the CLI predates `scope list`. It
-// arrived after the 4.0.0 release, but builds that have it may still report
-// 4.0.0, so support is detected from the refusal, not from --version. The plain
-// listing prints the global scope as the label "(global)", so --json is read.
+// Every scope a shelf uses, or null when the CLI predates `scope list`. The
+// subcommand arrived with Hypatia 4.1.0, but a build from main can carry it
+// while still reporting an older version, so support is detected from the
+// refusal, not from --version. The plain listing prints the global scope as the
+// label "(global)", so --json is read. The same command shape answers the tag
+// roster; both count statements as well as knowledge entries.
 export async function listScopes(shelf: string): Promise<string[] | null> {
   try {
     const result = await runHypatia(["scope", "list", "--json", "--shelf", shelf]);
     return parseValueList(result.stdout);
   } catch (error) {
     if (isUnrecognizedSubcommand(error, "scope")) return null;
+    throw error;
+  }
+}
+
+export async function listTags(shelf: string): Promise<string[] | null> {
+  try {
+    const result = await runHypatia(["tag", "list", "--json", "--shelf", shelf]);
+    return parseValueList(result.stdout);
+  } catch (error) {
+    if (isUnrecognizedSubcommand(error, "tag")) return null;
     throw error;
   }
 }
@@ -256,6 +279,61 @@ export async function getKnowledgeByNames(shelf: string, names: string[]): Promi
   return uniqueNames.flatMap((name) => {
     const knowledge = byName.get(name);
     return knowledge ? [knowledge] : [];
+  });
+}
+
+export interface SimilarKnowledge {
+  knowledge: Knowledge;
+  distance: number | null;
+}
+
+// Session logs are the bulk of a memory shelf and match almost any query, so a
+// semantic search over everything would return little else. Keyword search
+// still reaches them; only the vector search skips them.
+export const SEMANTIC_EXCLUDED_TAGS = ["message", "session", "summary", "hypatia-dream-run", "system"];
+
+// The CLI reports "model unavailable" and exits non-zero when the shelf has no
+// embedding model. That is a shelf state, not a broken request.
+export function isSemanticUnavailable(error: unknown): boolean {
+  return error instanceof HypatiaCliError && /model unavailable|semantic search is off/i.test(error.message);
+}
+
+// `similar` returns name, distance and content but no created_at, so the rows
+// are resolved back through the normal knowledge read to keep one record shape.
+// A `where` condition is applied by the CLI before it picks its nearest rows,
+// which is the only way a scope filter can reach beyond the top candidates.
+export async function findSimilarKnowledge(
+  shelf: string,
+  query: string,
+  limit: number,
+  options?: { where?: unknown }
+): Promise<SimilarKnowledge[]> {
+  const args = [
+    "similar",
+    query,
+    "--target",
+    "knowledge",
+    "--limit",
+    String(limit),
+    "--exclude-tags",
+    SEMANTIC_EXCLUDED_TAGS.join(",")
+  ];
+  if (options?.where) args.push("--where", JSON.stringify(options.where));
+  args.push("--shelf", shelf);
+  const result = await runHypatia(args);
+
+  const distances = new Map<string, number | null>();
+  for (const row of parseCliRows(result.stdout)) {
+    const name = asString(row.name);
+    if (!name || distances.has(name)) continue;
+    distances.set(name, typeof row.distance === "number" ? row.distance : null);
+  }
+
+  const knowledge = await getKnowledgeByNames(shelf, [...distances.keys()]);
+  const byName = new Map(knowledge.map((item) => [item.name, item]));
+  return [...distances].flatMap(([name, distance]) => {
+    const item = byName.get(name);
+    return item ? [{ knowledge: item, distance }] : [];
   });
 }
 

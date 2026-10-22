@@ -24,7 +24,10 @@ npx --yes hypatia-archive --no-open
 ## What It Does
 
 - Lists registered Hypatia shelves and works with the selected connected shelf.
-- Searches knowledge with Hypatia's JSE full-text query, then filters locally by tag and scope. The scope filter offers every scope the shelf uses, read with `hypatia scope list`; a Hypatia build without that command (the 4.0.0 release and earlier) offers only the scopes of the loaded page. Support is detected at run time, not from the version number: builds from Hypatia's main branch that have the command still report 4.0.0. The roster counts statements too, so a scope that only statements carry is offered and filters the record list to nothing.
+- Searches knowledge in two modes. **Keyword** asks Hypatia's JSE full-text query and then filters locally by tag and scope. **Semantic** runs `hypatia similar` against the shelf's embedding model, skips the operational layer (entries tagged `message`, `session`, `summary`, `hypatia-dream-run`, or `system`), and shows each hit's cosine distance instead of a page cursor. A shelf without an embedding model explains that instead of failing the request.
+- Suggests tags while you type, read with `hypatia tag list` and capped at 50 matching values; the box still accepts any tag typed by hand.
+- Marks entries the shelf keeps out of the vector index (`content.embed` is false) with a **not embedded** badge. Keyword search still finds them.
+- The scope filter offers every scope the shelf uses, read with `hypatia scope list`. Both rosters arrived with Hypatia 4.1.0 and are detected at run time from the command's refusal, not from `--version`, so an older CLI falls back to the scopes on the loaded page and a free-text tag box. The rosters count statements too, so a scope that only statements carry is offered and filters the record list to nothing.
 - Opens the complete knowledge record with its direct incoming and outgoing statements.
 - Maps a focused local neighborhood in the Graph workspace, including statement references whose knowledge record has been deleted.
 - Lets users inspect nodes and directed relationships, expand a node's immediate relations, and refocus the map with the toolbar control or a double-click/tap.
@@ -57,14 +60,18 @@ Knowledge records whose stored format is `markdown` or `md` are rendered with `r
 
 ## Hypatia Compatibility
 
-Hypatia Archive `0.1.3` is validated with [Hypatia 0.3.0](https://github.com/MarchLiu/hypatia). Hypatia 0.3.0 returns statement positions as `head`, `relation`, and `tail`; the server normalizes those fields for the record inspector and Graph workspace. The prior `subject`, `predicate`, and `object` response shape remains supported for compatibility with older shelves and CLI releases.
+Hypatia Archive `0.2.0` is validated with [Hypatia 4.1.1](https://github.com/MarchLiu/hypatia). The version was checked against the running CLI rather than the README: `--version`, `list`, the JSE query shapes this server builds, `search`, `scope list --json`, `tag list --json`, `knowledge-get`, `similar`, and both delete commands were exercised on a real shelf, including the not-found behavior (`knowledge-get` prints `Knowledge 'x' not found.` and exits 0; the delete commands exit 1).
+
+Hypatia 4.1.0 added the `scope list` and `tag list` subcommands, the `similar --tags/--exclude-tags/--where` filters, `knowledge-update`, and the optional `content.embed` flag; the console detects each capability at run time and degrades instead of failing. Hypatia 4.1.1 changed no CLI surface. Statements still come back as `head`, `relation`, and `tail` — normalized for the record inspector and Graph workspace — and the earlier `subject`, `predicate`, `object` shape remains supported for older shelves. `knowledge-delete` still does not cascade to statements, which is why the console keeps the retain-by-default choice.
+
+One thing the console deliberately does not do is push the tag and scope filters into the JSE query. In 4.1.1 `$contains` matches a tag exactly and case-sensitively, so it is not the substring rule the filter uses, and `$search` cannot be combined with `$contains` in one operand (it returns no rows, and wrapping both in `$and` errors with `$search is not a SQL condition`).
 
 ## Requirements
 
 - Node.js 22 or later
 - Hypatia installed and available on `PATH`, or `HYPATIA_BIN` set to the absolute executable path
 
-The server only binds to `127.0.0.1`. It invokes Hypatia through `spawn` with argv arrays, not a shell command string. Calls are serialized because Hypatia's shelf store permits one CLI process at a time.
+The server only binds to `127.0.0.1`. It invokes Hypatia through `spawn` with argv arrays, not a shell command string. Calls are queued rather than run in parallel. Hypatia's shelf store is safe for concurrent processes — SQLite runs WAL with a five-second busy timeout and PostgreSQL serializes on its own — so the queue is not a correctness requirement: it exists because each command opens with schema setup and an embedding-debt flush, both of which take a brief write lock, and a cold semantic search loads an embedding model the next call would reload.
 
 ## Develop From Source
 
@@ -92,6 +99,14 @@ pnpm typecheck
 pnpm build
 npm pack --dry-run
 ```
+
+The default suite uses fake CLI binaries, so it cannot notice the installed Hypatia changing shape. To check the real one, run the contract tests in `tests/live-cli.test.ts` (they never create or delete a record):
+
+```bash
+HYPATIA_LIVE=1 pnpm test
+```
+
+They are skipped otherwise, so CI needs no Hypatia install. `HYPATIA_LIVE_SHELF` names a shelf other than `default`.
 
 ## License
 

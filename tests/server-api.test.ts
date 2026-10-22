@@ -47,6 +47,8 @@ interface FakeOptions {
   onDeleteKnowledge?: (name: string) => Promise<void>;
   runHypatia?: HypatiaService["runHypatia"];
   listScopes?: HypatiaService["listScopes"];
+  listTags?: HypatiaService["listTags"];
+  findSimilarKnowledge?: HypatiaService["findSimilarKnowledge"];
 }
 
 function createFakeHypatia({
@@ -55,7 +57,9 @@ function createFakeHypatia({
   calls = [],
   onDeleteKnowledge,
   runHypatia,
-  listScopes
+  listScopes,
+  listTags,
+  findSimilarKnowledge
 }: FakeOptions = {}): HypatiaService {
   const byName = new Map(records.map((item) => [item.name, item]));
 
@@ -77,7 +81,9 @@ function createFakeHypatia({
     }),
     getKnowledge: async (_shelf, name) => byName.get(name) || null,
     getRelationships: async (_shelf, name) => relationships.filter((item) => item.subject === name || item.object === name),
+    findSimilarKnowledge: findSimilarKnowledge || (async () => []),
     listScopes: listScopes || (async () => null),
+    listTags: listTags || (async () => null),
     deleteStatement: async (_shelf, item) => {
       calls.push("statement:" + item.subject + ":" + item.predicate + ":" + item.object);
     },
@@ -323,6 +329,113 @@ test("a failing scope list becomes an API gateway error", async () => {
 
   await withServer(service, async (baseUrl) => {
     const response = await requestJson(baseUrl, "/api/scopes?shelf=x");
+    assert.equal(response.status, 502);
+    assert.deepEqual(response.body, { error: "Error: shelf error: shelf 'x' is not connected" });
+  });
+});
+
+test("tag roster reports every tag of the requested shelf", async () => {
+  const shelves: string[] = [];
+  const service = createFakeHypatia({
+    listTags: async (shelf) => {
+      shelves.push(shelf);
+      return ["memory", "rule"];
+    }
+  });
+
+  await withServer(service, async (baseUrl) => {
+    const response = await requestJson(baseUrl, "/api/tags?shelf=work");
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body, { supported: true, tags: ["memory", "rule"] });
+    await requestJson(baseUrl, "/api/tags");
+    assert.deepEqual(shelves, ["work", "default"]);
+  });
+});
+
+test("tag roster is unsupported when the CLI predates tag list", async () => {
+  await withServer(createFakeHypatia({ listTags: async () => null }), async (baseUrl) => {
+    const response = await requestJson(baseUrl, "/api/tags");
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body, { supported: false, tags: [] });
+  });
+});
+
+test("semantic search keeps the ranked order and applies the local filters", async () => {
+  const alpha = knowledge("Alpha", ["keep"], ["p"]);
+  const beta = knowledge("Beta", ["drop"], ["p"]);
+  const gamma = knowledge("Gamma", ["keep"], ["q"]);
+  const limits: number[] = [];
+  const wheres: unknown[] = [];
+  const service = createFakeHypatia({
+    findSimilarKnowledge: async (_shelf, _query, limit, options) => {
+      limits.push(limit);
+      wheres.push(options?.where);
+      return [
+        { knowledge: alpha, distance: 0.1 },
+        { knowledge: beta, distance: 0.2 },
+        { knowledge: gamma, distance: 0.3 }
+      ];
+    }
+  });
+
+  await withServer(service, async (baseUrl) => {
+    const all = await requestJson(baseUrl, "/api/similar?q=anything&limit=7");
+    assert.equal(all.status, 200);
+    assert.equal(all.body.supported, true);
+    assert.equal(all.body.reason, "");
+    assert.deepEqual((all.body.items as Array<{ name: string; distance: number }>).map((item) => [item.name, item.distance]), [
+      ["Alpha", 0.1],
+      ["Beta", 0.2],
+      ["Gamma", 0.3]
+    ]);
+
+    const filtered = await requestJson(baseUrl, "/api/similar?q=anything&tag=keep&scope=p");
+    assert.deepEqual((filtered.body.items as Array<{ name: string }>).map((item) => item.name), ["Alpha"]);
+    // The tag filter is applied locally, so the request widens the candidate
+    // pool; the scope is exact membership and is pushed into the query.
+    assert.deepEqual(limits, [7, 200]);
+    assert.deepEqual(wheres, [undefined, ["$contains", "scopes", "p"]]);
+
+    const global = await requestJson(baseUrl, "/api/similar?q=anything&scope=__global__");
+    assert.deepEqual((global.body.items as Array<{ name: string }>).map((item) => item.name), []);
+    assert.deepEqual(limits, [7, 200, 50]);
+    assert.deepEqual(wheres, [undefined, ["$contains", "scopes", "p"], undefined]);
+  });
+});
+
+test("semantic search needs a query", async () => {
+  await withServer(createFakeHypatia(), async (baseUrl) => {
+    const response = await requestJson(baseUrl, "/api/similar?q=%20%20");
+    assert.equal(response.status, 400);
+    assert.match(String(response.body.error), /needs a query/i);
+  });
+});
+
+test("a shelf without an embedding model answers unsupported", async () => {
+  const service = createFakeHypatia({
+    findSimilarKnowledge: async () => {
+      throw new HypatiaCliError("Error: model unavailable: semantic search is off on shelf 'default': no embedding model is set up");
+    }
+  });
+
+  await withServer(service, async (baseUrl) => {
+    const response = await requestJson(baseUrl, "/api/similar?q=anything");
+    assert.equal(response.status, 200);
+    assert.equal(response.body.supported, false);
+    assert.match(String(response.body.reason), /model unavailable/);
+    assert.deepEqual(response.body.items, []);
+  });
+});
+
+test("other semantic search failures become API gateway errors", async () => {
+  const service = createFakeHypatia({
+    findSimilarKnowledge: async () => {
+      throw new HypatiaCliError("Error: shelf error: shelf 'x' is not connected");
+    }
+  });
+
+  await withServer(service, async (baseUrl) => {
+    const response = await requestJson(baseUrl, "/api/similar?q=anything&shelf=x");
     assert.equal(response.status, 502);
     assert.deepEqual(response.body, { error: "Error: shelf error: shelf 'x' is not connected" });
   });

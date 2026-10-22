@@ -4,6 +4,8 @@ export interface KnowledgeContent {
   tags: string[];
   scopes: string[];
   figures: string[];
+  // Present only when the shelf reports the entry as out of the vector index.
+  embed?: boolean;
 }
 
 export interface Knowledge {
@@ -31,6 +33,24 @@ export interface Shelf {
 export interface ScopesResponse {
   supported: boolean;
   scopes: string[];
+}
+
+// supported is false when the CLI predates `hypatia tag list`.
+export interface TagsResponse {
+  supported: boolean;
+  tags: string[];
+}
+
+export interface SimilarItem extends Knowledge {
+  distance: number | null;
+}
+
+// supported is false when the shelf has no embedding model, so the same URL
+// answers "this shelf cannot do that" instead of failing.
+export interface SimilarResponse {
+  supported: boolean;
+  reason: string;
+  items: SimilarItem[];
 }
 
 export interface KnowledgePage {
@@ -97,6 +117,19 @@ export function getShelves(): Promise<{ shelves: Shelf[] }> {
 export function getScopes(shelf: string, signal?: AbortSignal): Promise<ScopesResponse> {
   const search = new URLSearchParams({ shelf });
   return request("/api/scopes?" + search.toString(), { signal });
+}
+
+export function getTags(shelf: string, signal?: AbortSignal): Promise<TagsResponse> {
+  const search = new URLSearchParams({ shelf });
+  return request("/api/tags?" + search.toString(), { signal });
+}
+
+export function getSimilar(params: { shelf: string; q: string; tag: string; scope: string; limit?: number; signal?: AbortSignal }): Promise<SimilarResponse> {
+  const search = new URLSearchParams({ shelf: params.shelf, q: params.q });
+  if (params.tag) search.set("tag", params.tag);
+  if (params.scope) search.set("scope", params.scope);
+  search.set("limit", String(params.limit || 50));
+  return request("/api/similar?" + search.toString(), { signal: params.signal });
 }
 
 export function getKnowledgePage(params: { shelf: string; q: string; tag: string; scope: string; cursor?: string; limit?: number; signal?: AbortSignal }): Promise<KnowledgePage> {
